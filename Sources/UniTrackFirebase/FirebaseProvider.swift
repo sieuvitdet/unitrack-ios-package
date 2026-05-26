@@ -21,12 +21,37 @@ public final class FirebaseProvider: AnalyticsProvider {
     private let portalEndpoint: String?
     private let portalApiKey: String?
 
-    /// portalEndpoint + portalApiKey: optional. When both are set, every event
-    /// forwarded to Firebase is ALSO copied to the UniTrack portal tagged
-    /// provider=firebase, so the portal can show what went to Firebase.
-    public init(portalEndpoint: String? = nil, portalApiKey: String? = nil) {
+    /// "Super properties": custom fields merged into EVERY event sent to
+    /// Firebase (e.g. app_env, tenant_id). Event-specific properties win on key
+    /// conflicts. Mutable at runtime via setSuperProperty / removeSuperProperty.
+    private var superProperties: [String: Any]
+    /// Firebase user properties to set at init (for audiences/segmentation).
+    private let initialUserProperties: [String: Any]
+    private let lock = NSLock()
+
+    /// - portalEndpoint/portalApiKey: optional portal mirror (provider=firebase).
+    /// - superProperties: merged into every event's parameters.
+    /// - userProperties: Firebase setUserProperty at init (audience segmentation).
+    public init(portalEndpoint: String? = nil,
+                portalApiKey: String? = nil,
+                superProperties: [String: Any] = [:],
+                userProperties: [String: Any] = [:]) {
         self.portalEndpoint = portalEndpoint
         self.portalApiKey = portalApiKey
+        self.superProperties = superProperties
+        self.initialUserProperties = userProperties
+    }
+
+    /// Add/replace a super property at runtime (applies to subsequent events).
+    public func setSuperProperty(_ key: String, _ value: Any) {
+        lock.lock(); superProperties[key] = value; lock.unlock()
+    }
+    public func removeSuperProperty(_ key: String) {
+        lock.lock(); superProperties.removeValue(forKey: key); lock.unlock()
+    }
+    /// Set a Firebase user property at runtime.
+    public func setUserProperty(_ key: String, _ value: String?) {
+        Analytics.setUserProperty(value, forName: sanitizeName(key))
     }
 
     public func initializeProvider() {
@@ -35,12 +60,39 @@ public final class FirebaseProvider: AnalyticsProvider {
         if FirebaseApp.app() == nil {
             FirebaseApp.configure()
         }
+        // Don't let UniTrack capture our portal-mirror uploads (feedback loop).
+        if let ep = portalEndpoint, let host = URL(string: ep)?.host {
+            UniTrack.excludeFromNetworkCapture(urlContaining: host)
+        }
+        // CRUCIAL: Firebase Analytics itself POSTs measurement data to these
+        // Google hosts. Without excluding them, UniTrack auto-captures each
+        // Firebase upload as a network_request, which is then forwarded back to
+        // Firebase/Snowplow → captured again → an endless amplifying loop.
+        for host in [
+            "app-analytics-services.com",      // GoogleAppMeasurement upload
+            "app-measurement.com",
+            "firebase-settings.crashlytics.com",
+            "firebaseinstallations.googleapis.com",
+            "firebaseremoteconfig.googleapis.com",
+            "google-analytics.com",
+            "analytics.google.com",
+        ] {
+            UniTrack.excludeFromNetworkCapture(urlContaining: host)
+        }
+        // Apply initial Firebase user properties (for audiences/segmentation).
+        for (k, v) in initialUserProperties {
+            Analytics.setUserProperty(stringify(v), forName: sanitizeName(k))
+        }
         NSLog("[UniTrackFirebase] Firebase Analytics ready")
     }
 
     public func track(_ name: String, _ properties: [String: Any]) {
-        Analytics.logEvent(sanitizeName(name), parameters: sanitizeParams(properties))
-        mirrorToPortal(name, properties)
+        // Merge super properties under the event's own (event props win).
+        lock.lock(); let sup = superProperties; lock.unlock()
+        var merged = sup
+        for (k, v) in properties { merged[k] = v }
+        Analytics.logEvent(sanitizeName(name), parameters: sanitizeParams(merged))
+        mirrorToPortal(name, merged)
     }
 
     // Fire-and-forget copy to the portal, tagged provider=firebase.

@@ -13,6 +13,26 @@ final class UniTrackURLProtocol: URLProtocol, URLSessionDataDelegate {
 
     static let handledKey = "UniTrackURLProtocolHandled"
 
+    // URLs whose absolute string contains any of these substrings are NOT
+    // captured. This stops a feedback loop: the SDK's own uploads (portal
+    // ingest endpoint, Snowplow collector, provider mirror) would otherwise be
+    // auto-captured as network_request, forwarded again, captured again, …
+    // Populated by UniTrack at init via `excludeURL(containing:)`.
+    private static let ignoredLock = NSLock()
+    private static var ignoredSubstrings: [String] = []
+
+    static func excludeURL(containing substring: String) {
+        guard !substring.isEmpty else { return }
+        ignoredLock.lock(); defer { ignoredLock.unlock() }
+        if !ignoredSubstrings.contains(substring) { ignoredSubstrings.append(substring) }
+    }
+
+    private static func isIgnored(_ url: URL?) -> Bool {
+        guard let s = url?.absoluteString else { return false }
+        ignoredLock.lock(); defer { ignoredLock.unlock() }
+        return ignoredSubstrings.contains { !$0.isEmpty && s.contains($0) }
+    }
+
     private var session: URLSession?
     // Renamed from `task` to avoid illegally overriding URLProtocol.task.
     private var dataTask: URLSessionDataTask?
@@ -32,6 +52,8 @@ final class UniTrackURLProtocol: URLProtocol, URLSessionDataDelegate {
         if URLProtocol.property(forKey: handledKey, in: request) != nil {
             return false
         }
+        // Never capture the SDK's own analytics uploads (avoids a feedback loop).
+        if isIgnored(request.url) { return false }
         return request.url?.scheme == "http" || request.url?.scheme == "https"
     }
 

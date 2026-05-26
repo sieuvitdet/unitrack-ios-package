@@ -17,6 +17,46 @@ import UniTrack
 #if canImport(SnowplowTracker)
 import SnowplowTracker
 
+/// Snowplow TrackerConfiguration flags the developer can toggle. Defaults match
+/// Snowplow's recommended mobile setup; pass a custom one to override any flag.
+public struct SnowplowOptions {
+    public var base64Encoding: Bool
+    public var platformContext: Bool
+    public var applicationContext: Bool
+    public var sessionContext: Bool
+    public var screenContext: Bool
+    public var lifecycleAutotracking: Bool
+    public var screenEngagementAutotracking: Bool
+    public var exceptionAutotracking: Bool
+    public var installAutotracking: Bool
+    public var deepLinkContext: Bool
+    public var userAnonymisation: Bool
+
+    public init(base64Encoding: Bool = true,
+                platformContext: Bool = true,
+                applicationContext: Bool = true,
+                sessionContext: Bool = true,
+                screenContext: Bool = true,
+                lifecycleAutotracking: Bool = true,
+                screenEngagementAutotracking: Bool = true,
+                exceptionAutotracking: Bool = true,
+                installAutotracking: Bool = true,
+                deepLinkContext: Bool = true,
+                userAnonymisation: Bool = false) {
+        self.base64Encoding = base64Encoding
+        self.platformContext = platformContext
+        self.applicationContext = applicationContext
+        self.sessionContext = sessionContext
+        self.screenContext = screenContext
+        self.lifecycleAutotracking = lifecycleAutotracking
+        self.screenEngagementAutotracking = screenEngagementAutotracking
+        self.exceptionAutotracking = exceptionAutotracking
+        self.installAutotracking = installAutotracking
+        self.deepLinkContext = deepLinkContext
+        self.userAnonymisation = userAnonymisation
+    }
+}
+
 public final class SnowplowProvider: AnalyticsProvider {
 
     private let endpoint: String
@@ -25,6 +65,7 @@ public final class SnowplowProvider: AnalyticsProvider {
     private var userContext: [String: Any]?
     private let userContextSchema: String?
     private let schemas: [String: String]
+    private let options: SnowplowOptions
 
     private var tracker: TrackerController?
 
@@ -33,13 +74,15 @@ public final class SnowplowProvider: AnalyticsProvider {
                 namespace: String = "UniTrack",
                 userContext: [String: Any]? = nil,
                 userContextSchema: String? = nil,
-                schemas: [String: String] = [:]) {
+                schemas: [String: String] = [:],
+                options: SnowplowOptions = SnowplowOptions()) {
         self.endpoint = endpoint
         self.appId = appId
         self.namespace = namespace
         self.userContext = userContext
         self.userContextSchema = userContextSchema
         self.schemas = schemas
+        self.options = options
     }
 
     public func initializeProvider() {
@@ -47,19 +90,30 @@ public final class SnowplowProvider: AnalyticsProvider {
             NSLog("[UniTrackSnowplow] empty endpoint — provider disabled")
             return
         }
+        // Don't let UniTrack capture our own uploads to the collector.
+        if let host = URL(string: endpoint)?.host {
+            UniTrack.excludeFromNetworkCapture(urlContaining: host)
+        }
         let network = NetworkConfiguration(endpoint: endpoint, method: .post)
+        // All flags come from the developer-supplied options (defaults match
+        // Snowplow's recommended mobile setup).
         let trackerConfig = TrackerConfiguration()
             .appId(appId)
-            .base64Encoding(true)
-            .platformContext(true)
-            .applicationContext(true)
-            .sessionContext(true)
-            .screenContext(true)
-            .lifecycleAutotracking(true)
+            .base64Encoding(options.base64Encoding)
+            .platformContext(options.platformContext)
+            .applicationContext(options.applicationContext)
+            .sessionContext(options.sessionContext)
+            .screenContext(options.screenContext)
+            .lifecycleAutotracking(options.lifecycleAutotracking)
+            .screenEngagementAutotracking(options.screenEngagementAutotracking)
+            .exceptionAutotracking(options.exceptionAutotracking)
+            .installAutotracking(options.installAutotracking)
+            .deepLinkContext(options.deepLinkContext)
+            .userAnonymisation(options.userAnonymisation)
         tracker = Snowplow.createTracker(namespace: namespace,
                                          network: network,
                                          configurations: [trackerConfig])
-        NSLog("[UniTrackSnowplow] tracker ready (\(endpoint), appId=\(appId))")
+        NSLog("[UniTrackSnowplow] tracker ready (\(endpoint), appId=\(appId), lifecycle=\(options.lifecycleAutotracking))")
     }
 
     public func updateUserContext(_ ctx: [String: Any]) { userContext = ctx }

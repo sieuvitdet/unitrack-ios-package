@@ -106,6 +106,13 @@ public final class UniTrack {
         ut_set_enabled(ctx, enabled ? 1 : 0)
     }
 
+    /// Exclude a URL (matched by substring, e.g. a host) from network
+    /// auto-capture. Providers call this for their own collector/upload URLs so
+    /// the SDK never captures-and-re-forwards its own analytics traffic.
+    public static func excludeFromNetworkCapture(urlContaining substring: String) {
+        UniTrackURLProtocol.excludeURL(containing: substring)
+    }
+
     // MARK: - Semantic events (Phase 3)
 
     /// Notification received/opened. state: foreground|background|silent.
@@ -165,7 +172,14 @@ public final class UniTrack {
         if config.autoCapture {
             if config.trackScreens         { ViewControllerSwizzler.install() }
             if config.trackTaps            { ControlSwizzler.install() }
-            if config.trackNetwork         { UniTrackURLProtocol.install() }
+            if config.trackNetwork {
+                UniTrackURLProtocol.install()
+                // Don't capture the SDK's own uploads (avoids a feedback loop:
+                // upload → captured as network_request → forwarded → captured…).
+                if let ep = config.endpoint, let host = URL(string: ep)?.host {
+                    UniTrackURLProtocol.excludeURL(containing: host)
+                }
+            }
             if config.trackMemoryWarnings  { MemoryWarningObserver.install() }
             AppLifecycleObserver.install()
         }
