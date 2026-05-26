@@ -27,6 +27,23 @@ public struct UniTrackRemoteConfig: Codable {
     public var snowplow: SnowplowConfig
     public var firebase: FirebaseConfig
     public var eventRegistry: [EventDef]
+    public var rules: [Rule]?
+
+    // Phase 2 rewrite rule: match an auto-captured event → a business event.
+    public struct Rule: Codable {
+        public var matchEvent: String
+        public var matchScreen: String?
+        public var matchElementKey: String?
+        public var toName: String
+        public var addProps: [String: AnyCodable]?
+        enum CodingKeys: String, CodingKey {
+            case matchEvent = "match_event"
+            case matchScreen = "match_screen"
+            case matchElementKey = "match_element_key"
+            case toName = "to_name"
+            case addProps = "add_props"
+        }
+    }
 
     public struct SDKConfig: Codable {
         public var batchSize: Int?
@@ -75,10 +92,22 @@ public struct UniTrackRemoteConfig: Codable {
 
     // JSON keys are snake_case on the wire.
     enum CodingKeys: String, CodingKey {
-        case version, endpoint
+        case version, endpoint, rules
         case sdkConfig = "sdk_config"
         case snowplow, firebase
         case eventRegistry = "event_registry"
+    }
+
+    /// Map decoded config rules → UniTrack.EventRule for the SDK.
+    public func toEventRules() -> [UniTrack.EventRule] {
+        (rules ?? []).map { r in
+            UniTrack.EventRule(
+                matchEvent: r.matchEvent,
+                matchScreen: r.matchScreen,
+                matchElementKey: r.matchElementKey,
+                toName: r.toName,
+                addProps: r.addProps?.unwrapped() ?? [:])
+        }
     }
 
     // MARK: - Fetch + cache
@@ -134,7 +163,8 @@ public struct UniTrackRemoteConfig: Codable {
                                  trackNetwork: true, logLevel: "warn"),
             snowplow: SnowplowConfig(enabled: false),
             firebase: FirebaseConfig(enabled: false),
-            eventRegistry: []
+            eventRegistry: [],
+            rules: nil
         )
     }
 }
