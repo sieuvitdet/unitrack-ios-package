@@ -27,15 +27,38 @@ public final class FirebaseProvider: AnalyticsProvider {
     private var superProperties: [String: Any]
     /// Firebase user properties to set at init (for audiences/segmentation).
     private let initialUserProperties: [String: Any]
+    /// Optional runtime FirebaseOptions (from remote config). When set, the
+    /// provider calls FirebaseApp.configure(options:) instead of relying on a
+    /// bundled GoogleService-Info.plist — so the values live on the portal.
+    public struct Options {
+        public var googleAppID: String   // GOOGLE_APP_ID (e.g. 1:NNN:ios:xxx)
+        public var gcmSenderID: String   // GCM_SENDER_ID
+        public var apiKey: String?
+        public var projectID: String?
+        public var bundleID: String?
+        public var storageBucket: String?
+        public init(googleAppID: String, gcmSenderID: String, apiKey: String? = nil,
+                    projectID: String? = nil, bundleID: String? = nil, storageBucket: String? = nil) {
+            self.googleAppID = googleAppID; self.gcmSenderID = gcmSenderID
+            self.apiKey = apiKey; self.projectID = projectID
+            self.bundleID = bundleID; self.storageBucket = storageBucket
+        }
+    }
+    private let runtimeOptions: Options?
     private let lock = NSLock()
 
+    /// - firebaseOptions: when provided, Firebase is configured at runtime from
+    ///   these portal values (no GoogleService-Info.plist needed). When nil, the
+    ///   bundled plist is used.
     /// - portalEndpoint/portalApiKey: optional portal mirror (provider=firebase).
     /// - superProperties: merged into every event's parameters.
     /// - userProperties: Firebase setUserProperty at init (audience segmentation).
-    public init(portalEndpoint: String? = nil,
+    public init(firebaseOptions: Options? = nil,
+                portalEndpoint: String? = nil,
                 portalApiKey: String? = nil,
                 superProperties: [String: Any] = [:],
                 userProperties: [String: Any] = [:]) {
+        self.runtimeOptions = firebaseOptions
         self.portalEndpoint = portalEndpoint
         self.portalApiKey = portalApiKey
         self.superProperties = superProperties
@@ -55,10 +78,20 @@ public final class FirebaseProvider: AnalyticsProvider {
     }
 
     public func initializeProvider() {
-        // initializeApp reads GoogleService-Info.plist. Guard against the app
-        // having already configured Firebase.
+        // Configure Firebase. With runtime options (from the portal) we build a
+        // FirebaseOptions and call configure(options:) — no bundled plist needed.
+        // Otherwise fall back to the plist-based configure().
         if FirebaseApp.app() == nil {
-            FirebaseApp.configure()
+            if let o = runtimeOptions {
+                let opts = FirebaseOptions(googleAppID: o.googleAppID, gcmSenderID: o.gcmSenderID)
+                if let v = o.apiKey { opts.apiKey = v }
+                if let v = o.projectID { opts.projectID = v }
+                if let v = o.bundleID { opts.bundleID = v }
+                if let v = o.storageBucket { opts.storageBucket = v }
+                FirebaseApp.configure(options: opts)
+            } else {
+                FirebaseApp.configure()
+            }
         }
         // Don't let UniTrack capture our portal-mirror uploads (feedback loop).
         if let ep = portalEndpoint, let host = URL(string: ep)?.host {
