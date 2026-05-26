@@ -64,9 +64,12 @@ private extension UIViewController {
 
     // Use the controller's class name as the stable analytics screen name. (We
     // intentionally do NOT use `title`, which is often a localized navbar string
-    // and not a stable key.)
+    // and not a stable key.) Strip the Swift module prefix so the name is
+    // consistent — `type(of:)` can yield "MyApp.HomeVC" or "HomeVC" depending on
+    // context; we always want the bare class name.
     var ut_screenName: String {
-        String(describing: type(of: self))
+        let full = String(describing: type(of: self))
+        return full.split(separator: ".").last.map(String.init) ?? full
     }
 
     @objc func ut_viewDidLoad() {
