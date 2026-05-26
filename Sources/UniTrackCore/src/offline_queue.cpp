@@ -37,6 +37,11 @@ bool OfflineQueue::open(const std::string& db_path) {
 }
 
 bool OfflineQueue::ensure_schema() {
+    // 1) Create the table (new installs get next_retry_at directly) + the index
+    //    that only references columns guaranteed to exist on ALL versions.
+    //    IMPORTANT: do NOT create the next_retry_at index here — on a pre-backoff
+    //    database the column doesn't exist yet, so that index would fail and abort
+    //    the whole exec before the migration below runs.
     const char* sql =
         "CREATE TABLE IF NOT EXISTS events ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -46,8 +51,7 @@ bool OfflineQueue::ensure_schema() {
         "  retry_count INTEGER NOT NULL DEFAULT 0,"
         "  next_retry_at INTEGER NOT NULL DEFAULT 0"
         ");"
-        "CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);"
-        "CREATE INDEX IF NOT EXISTS idx_events_next_retry ON events(next_retry_at);";
+        "CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);";
     char* err = nullptr;
     int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &err);
     if (rc != SQLITE_OK) {
@@ -55,9 +59,9 @@ bool OfflineQueue::ensure_schema() {
         if (err) sqlite3_free(err);
         return false;
     }
-    // Migrate a pre-backoff database (created before next_retry_at existed).
-    // ALTER TABLE ADD COLUMN is a no-op error if the column already exists, so
-    // we check PRAGMA table_info first to avoid noisy log spam.
+
+    // 2) Migrate a pre-backoff database (events table created before
+    //    next_retry_at existed). Add the column if missing.
     bool has_col = false;
     sqlite3_stmt* st = nullptr;
     if (sqlite3_prepare_v2(db_, "PRAGMA table_info(events);", -1, &st, nullptr) == SQLITE_OK) {
@@ -75,6 +79,11 @@ bool OfflineQueue::ensure_schema() {
             "ALTER TABLE events ADD COLUMN next_retry_at INTEGER NOT NULL DEFAULT 0;",
             nullptr, nullptr, nullptr);
     }
+
+    // 3) Now the column is guaranteed to exist — create its index.
+    sqlite3_exec(db_,
+        "CREATE INDEX IF NOT EXISTS idx_events_next_retry ON events(next_retry_at);",
+        nullptr, nullptr, nullptr);
     return true;
 }
 
