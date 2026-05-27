@@ -45,7 +45,17 @@ let package = Package(
         .target(
             name: "UniTrack",
             dependencies: ["UniTrackCore"],
-            path: "Sources/UniTrack"
+            path: "Sources/UniTrack",
+            swiftSettings: [
+                // The module ("UniTrack") and its main class ("UniTrack") share a
+                // name. When emitting the module interface for library evolution
+                // (BUILD_LIBRARY_FOR_DISTRIBUTION=YES, used by xcframework /
+                // CocoaPods builds), the verifier reads "UniTrack.Config" as a
+                // member of the class instead of the module type and fails. This
+                // flag aliases the module name in the emitted interface so those
+                // references resolve unambiguously.
+                .unsafeFlags(["-alias-module-names-in-module-interface"])
+            ]
         ),
         .target(
             name: "UniTrackFirebase",
