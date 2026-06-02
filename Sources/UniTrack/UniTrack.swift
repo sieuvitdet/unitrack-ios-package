@@ -33,6 +33,19 @@ public final class UniTrack {
         public var journeyCapture: Bool         = true
         public var sessionTimeoutMs: Int        = 1_800_000  // 30 min
 
+        /// Event names emitted on screen transition. Core fires three events
+        /// per transition: screenEndEvent for the previous screen (with
+        /// dwell_ms), `screen_view` (always, back-compat), then
+        /// screenStartEvent for the new screen. Override these per project
+        /// from the portal `sdk_config` so the wire taxonomy matches the
+        /// product spec (e.g. "screen_viewed" / "screen_exited").
+        public var screenStartEvent: String?    = nil
+        public var screenEndEvent:   String?    = nil
+        /// Event name fired by the viewDidAppear swizzler with load_ms.
+        /// Default `screen_load_completed`; override via portal
+        /// `sdk_config.screen_load_event`.
+        public var screenLoadEvent:  String     = "screen_load_completed"
+
         public init() {}
     }
 
@@ -51,6 +64,23 @@ public final class UniTrack {
     // Registered third-party providers (Snowplow, Firebase, …). Every event is
     // forwarded to each one. Empty by default — core has zero such dependencies.
     private var providers: [AnalyticsProvider] = []
+
+    // Per-event NSLog of what flows through UniTrack/Snowplow/Firebase. Default ON
+    // so integrators see traffic immediately while wiring the SDK up; flip to OFF
+    // (UniTrack.verboseLogging = false) before shipping a release build.
+    public static var verboseLogging: Bool = true
+
+    /// Resolved event name for the swizzler's screen_load_completed fire.
+    /// Initialised from `config.screenLoadEvent` on initialize() so swizzlers
+    /// (which have no direct config access) can read a single static.
+    internal static var screenLoadEventName: String = "screen_load_completed"
+
+    /// Provider/helper code uses this instead of NSLog directly so the integrator
+    /// can mute every log line with one flag. Format is the same as NSLog.
+    public static func log(_ format: String, _ args: CVarArg...) {
+        guard verboseLogging else { return }
+        withVaList(args) { NSLogv(format, $0) }
+    }
 
     // MARK: - Public API
 
@@ -139,6 +169,16 @@ public final class UniTrack {
         if let (rewritten, rewrittenProps) = shared.applyRules(event, properties) {
             name = rewritten
             props = rewrittenProps
+            UniTrack.log("[UniTrack] rule rewrite: %@ → %@", event, rewritten)
+        }
+        // Visibility — one line per event so the developer can see what's
+        // about to be forwarded and to which provider list. Gated by
+        // UniTrack.verboseLogging so a release build can mute it.
+        if UniTrack.verboseLogging {
+            let provNames = shared.providers.map { String(describing: type(of: $0)) }.joined(separator: ",")
+            UniTrack.log("[UniTrack] track event=\"%@\" props=%@ → providers=[%@]",
+                         name, UniTrack.jsonString(from: props) ?? "{}",
+                         provNames.isEmpty ? "(none)" : provNames)
         }
         // Forward to every registered provider (Snowplow, Firebase, …).
         forEachProvider { $0.track(name, props) }
@@ -201,6 +241,33 @@ public final class UniTrack {
         return u.path
     }
 
+    // MARK: - W3C Trace Context
+
+    /// One outbound HTTP call's identifying triple. `traceId` is 32 lowercase
+    /// hex (128 bit), `spanId` is 16 lowercase hex (64 bit), and `header` is
+    /// the ready-to-attach value for the `traceparent` request header.
+    public struct Trace {
+        public let traceId: String
+        public let spanId:  String
+        public let header:  String     // "00-<trace>-<span>-01"
+    }
+
+    /// Allocate a fresh trace_id + span_id pair. Cheap (one PRNG call) — safe
+    /// to call per HTTP request.
+    public static func newTrace(sampled: Bool = true) -> Trace {
+        var ids = ut_new_trace()
+        let traceId = withUnsafePointer(to: &ids.trace_id) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 33) { String(cString: $0) }
+        }
+        let spanId  = withUnsafePointer(to: &ids.span_id) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 17) { String(cString: $0) }
+        }
+        var buf = [CChar](repeating: 0, count: 64)
+        let n = ut_format_traceparent(&ids, sampled ? 1 : 0, &buf, buf.count)
+        let header: String = n > 0 ? String(cString: buf) : ""
+        return Trace(traceId: traceId, spanId: spanId, header: header)
+    }
+
     // MARK: - Internal
 
     var contextHandle: OpaquePointer? { context }
@@ -209,6 +276,12 @@ public final class UniTrack {
         guard !isInitialized else {
             NSLog("[UniTrack] already initialized")
             return
+        }
+
+        // Wire taxonomy override into the swizzler bridge before installing
+        // the swizzlers below — they read this static at fire time.
+        if !config.screenLoadEvent.isEmpty {
+            UniTrack.screenLoadEventName = config.screenLoadEvent
         }
 
         let cfgJson = UniTrack.buildConfigJson(config)
@@ -248,6 +321,24 @@ public final class UniTrack {
 
         // Bring up any providers registered before initialize().
         for p in providers { p.initializeProvider() }
+
+        // Pop any crash recovered at ut_init from the core. Core already
+        // enqueued it to the offline queue (→ portal HTTP); this re-emits
+        // through provider track() so Snowplow's convention helpers +
+        // Firebase's sanitizer process it like a live crash.
+        if let ctx = context, !providers.isEmpty {
+            let cstr = ut_pop_recovered_crash(ctx)
+            let json = cstr.map { String(cString: $0) } ?? ""
+            if !json.isEmpty,
+               let data = json.data(using: .utf8),
+               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                var props = dict
+                props["recovered_on_launch"] = true
+                UniTrack.log("[UniTrack] fan-out recovered crash to %d provider(s)",
+                             providers.count)
+                for p in providers { p.track("crash", props) }
+            }
+        }
     }
 
     // MARK: - Helpers
@@ -272,6 +363,12 @@ public final class UniTrack {
         parts.append("\"auto_capture\":\(c.autoCapture)")
         parts.append("\"journey_capture\":\(c.journeyCapture)")
         parts.append("\"session_timeout_ms\":\(c.sessionTimeoutMs)")
+        if let s = c.screenStartEvent, !s.isEmpty {
+            parts.append("\"screen_start_event\":\"\(s)\"")
+        }
+        if let s = c.screenEndEvent, !s.isEmpty {
+            parts.append("\"screen_end_event\":\"\(s)\"")
+        }
         if let docs = FileManager.default.urls(
                 for: .documentDirectory, in: .userDomainMask).first {
             let dbPath = docs.appendingPathComponent("unitrack.db").path

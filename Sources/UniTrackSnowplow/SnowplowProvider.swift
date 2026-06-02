@@ -1,16 +1,26 @@
-// SnowplowProvider — forwards every UniTrack event to a Snowplow collector.
+// SnowplowProvider — forwards UniTrack events to a Snowplow collector via the
+// "convention layer". App code calls one of the 6 tracking* helpers below;
+// the SDK builds the iglu schema URI per call from portal config:
 //
-//   UniTrack.addProvider(SnowplowProvider(
-//       endpoint: "https://collector.example.com",
-//       appId: "701",
-//       userContext: ["username": "duc"],
-//       userContextSchema: "iglu:vn.fpt.ftel.snowplow/user_context/jsonschema/1-0-0",
-//       schemas: ["add_to_cart": "iglu:com.acme/add_to_cart/jsonschema/1-0-0"]))
-//   UniTrack.initialize(apiKey: ...)
+//   iglu:<igluVendor>/<eventName>/jsonschema/<defaultVersion>
 //
-// Events with a matching `schemas` entry → self-describing events; others →
-// Structured events (category "unitrack"). The optional user-context entity is
-// attached to every event. Uses the Snowplow iOS tracker SDK (SnowplowTracker).
+// where eventName comes from `eventNames[kind]` (portal `event_names.<kind>`)
+// or falls back to the SDK default name baked into the helper. Two context
+// entities are auto-attached to every call:
+//
+//   user_context — data sourced from setUser(...) + the userContext bag.
+//   core_action  — action_name (the resolved event name), timestamp (now),
+//                  screen, element_key.
+//
+// Both entity schema URIs come from portal `entities.<name>`. Adding extra
+// entity names to that map registers them, but the app must supply their
+// data per-call via the helper's `extraContexts:` parameter — the SDK only
+// builds user_context + core_action from app state on its own.
+//
+// The Structured + per-event-name `schemas[]` lookup paths from the previous
+// "blueprint engine" iteration are gone; `track(name, props)` is the lone
+// generic call left, and it now goes out as a self-describing event under
+// the convention schema (eventName = `name` passed in).
 
 import Foundation
 import UniTrack
@@ -70,27 +80,48 @@ public final class SnowplowProvider: AnalyticsProvider {
     private let endpoint: String
     private let appId: String
     private let namespace: String
-    private var userContext: [String: Any]?
-    private let userContextSchema: String?
-    private let schemas: [String: String]
     private let options: SnowplowOptions
+
+    // Convention vendor + version. Schema URI for any event/entity not given
+    // an explicit URI in entities[] is built as
+    //   iglu:<igluVendor>/<name>/jsonschema/<defaultVersion>
+    private let igluVendor: String?
+    private let defaultVersion: String
+
+    // Convention kind → event name. Portal `event_names.<kind>` wins; missing
+    // keys fall back to the hardcoded default ("event_click", …).
+    private var eventNames: [String: String]
+
+    // Auto-attached context entity name → schema URI. The SDK knows how to
+    // build data for "user_context" and "core_action" itself; any other name
+    // registered here just gets its schema, and the app must pass the data
+    // for it via the helper's `extraContexts:` parameter.
+    private var entities: [String: String]
+
+    // user_context bag. Mutated by setUser(_:_:) so traits land on the next
+    // event without the integrator having to re-register the provider.
+    private var userContext: [String: Any]
 
     private var tracker: TrackerController?
 
     public init(endpoint: String,
                 appId: String,
                 namespace: String = "UniTrack",
-                userContext: [String: Any]? = nil,
-                userContextSchema: String? = nil,
-                schemas: [String: String] = [:],
-                options: SnowplowOptions = SnowplowOptions()) {
+                userContext: [String: Any] = [:],
+                options: SnowplowOptions = SnowplowOptions(),
+                igluVendor: String? = nil,
+                defaultVersion: String = "1-0-0",
+                eventNames: [String: String] = [:],
+                entities: [String: String] = [:]) {
         self.endpoint = endpoint
         self.appId = appId
         self.namespace = namespace
         self.userContext = userContext
-        self.userContextSchema = userContextSchema
-        self.schemas = schemas
         self.options = options
+        self.igluVendor = igluVendor
+        self.defaultVersion = defaultVersion
+        self.eventNames = eventNames
+        self.entities = entities
     }
 
     public func initializeProvider() {
@@ -103,8 +134,6 @@ public final class SnowplowProvider: AnalyticsProvider {
             UniTrack.excludeFromNetworkCapture(urlContaining: host)
         }
         let network = NetworkConfiguration(endpoint: endpoint, method: .post)
-        // All flags come from the developer-supplied options (defaults match
-        // Snowplow's recommended mobile setup).
         let trackerConfig = TrackerConfiguration()
             .appId(appId)
             .base64Encoding(options.base64Encoding)
@@ -122,64 +151,478 @@ public final class SnowplowProvider: AnalyticsProvider {
         tracker = Snowplow.createTracker(namespace: namespace,
                                          network: network,
                                          configurations: [trackerConfig])
-        NSLog("[UniTrackSnowplow] tracker ready (\(endpoint), appId=\(appId), lifecycle=\(options.lifecycleAutotracking))")
+        NSLog("[UniTrackSnowplow] tracker ready (\(endpoint), appId=\(appId), vendor=\(igluVendor ?? "—"), version=\(defaultVersion), entities=\(entities.keys.sorted().joined(separator: ",")))")
     }
+
+    // MARK: - Hot reloads from remote config
 
     public func updateUserContext(_ ctx: [String: Any]) { userContext = ctx }
+    public func setEventNames(_ map: [String: String])  { eventNames = map }
+    public func setEntities(_ map: [String: String])    { entities = map }
 
-    private func entities() -> [SelfDescribingJson] {
-        guard let userContext = userContext, let schema = userContextSchema else {
-            return []
-        }
-        return [SelfDescribingJson(schema: schema, andData: userContext)]
-    }
-
-    public func track(_ name: String, _ properties: [String: Any]) {
-        guard let tracker = tracker else { return }
-        if let schema = schemas[name] {
-            // Self-describing event for mapped names.
-            let sd = SelfDescribing(schema: schema, payload: properties)
-            _ = sd.entities(entities())
-            tracker.track(sd)
-        } else {
-            // Structured event for everything else.
-            let structured = Structured(category: "unitrack", action: name)
-            structured.label =
-                (properties["screen"] ?? properties["screen_name"]) as? String
-            structured.property =
-                (properties["element_key"] ?? properties["state"]) as? String
-            _ = structured.entities(entities())
-            tracker.track(structured)
-        }
-    }
+    // MARK: - Provider protocol
 
     public func setUser(_ userId: String?, _ traits: [String: Any]) {
         tracker?.subject?.userId = userId
-        if !traits.isEmpty, var ctx = userContext {
-            traits.forEach { ctx[$0.key] = $0.value }
-            userContext = ctx
-        }
+        if let userId = userId { userContext["user_id"] = userId }
+        for (k, v) in traits { userContext[k] = v }
+    }
+
+    /// Generic catch-all that the UniTrack core fans events out to. Routed
+    /// through the convention path: `name` becomes the event name, schema URI
+    /// is built from vendor + name + version. App code should prefer the
+    /// typed tracking* helpers (built-in + generated per-kind) for type safety.
+    public func track(_ name: String, _ properties: [String: Any]) {
+        guard let schema = schemaFor(eventName: name) else { return }
+        trackSelfDescribing(schema: schema, eventName: name,
+                            data: properties, extraContexts: nil,
+                            skipGlobalContexts: false)
     }
 
     public func setScreen(_ name: String) {
         guard let tracker = tracker else { return }
         let sv = ScreenView(name: name)
-        _ = sv.entities(entities())
+        _ = sv.entities(buildEntities(forEventName: name, screen: name,
+                                      elementKey: nil, extra: nil,
+                                      skipGlobalContexts: false))
         tracker.track(sv)
+    }
+
+    // MARK: - Convention schema/entity plumbing
+
+    /// Build the convention schema URI. Returns nil + warns when vendor missing.
+    private func schemaFor(eventName: String) -> String? {
+        guard let vendor = igluVendor, !vendor.isEmpty else {
+            NSLog("[UniTrackSnowplow] no iglu_vendor in portal config — \"\(eventName)\" dropped. Set snowplow.iglu_vendor in the portal Config tab.")
+            return nil
+        }
+        return "iglu:\(vendor)/\(eventName)/jsonschema/\(defaultVersion)"
+    }
+
+    /// Accept any of these inputs from portal entity config and return a
+    /// well-formed iglu URI. Defensive — the portal UI guides the operator
+    /// to enter a short name, but old configs may carry a full URI and a
+    /// typo can drop the "iglu:" scheme; we fix both here.
+    ///
+    ///   "user_context"                                                  → iglu:<vendor>/user_context/jsonschema/<defaultVersion>
+    ///   "vn.fpt.ftel.snowplow/user_context/jsonschema/1-0-0"            → iglu:vn.fpt.ftel.snowplow/user_context/jsonschema/1-0-0
+    ///   "iglu:vn.fpt.ftel.snowplow/user_context/jsonschema/1-0-0"       → unchanged
+    private func normalizeEntityURI(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty { return nil }
+        if s.hasPrefix("iglu:") { return s }
+        // Any "/" → caller typed a path (likely missing the iglu: scheme).
+        if s.contains("/") { return "iglu:" + s }
+        // Short name path: build the full URI from vendor + version.
+        guard let vendor = igluVendor, !vendor.isEmpty else { return nil }
+        return "iglu:\(vendor)/\(s)/jsonschema/\(defaultVersion)"
+    }
+
+    /// Resolve a convention kind ("click", "result", …) to the actual event
+    /// name. Portal-supplied value wins; otherwise the SDK default fallback.
+    private func resolveEventName(kind: String, defaultName: String) -> String {
+        if let s = eventNames[kind], !s.isEmpty { return s }
+        return defaultName
+    }
+
+    /// Build the entity list attached to one event:
+    ///   1. user_context  — from userContext bag (if entities["user_context"] set).
+    ///   2. core_action   — from event meta (if entities["core_action"] set).
+    ///   3. extraContexts — anything the caller passed (campaign, experiment, …).
+    /// Any other name in `entities` is registered but data-less — pass it via
+    /// extraContexts when calling the helper. `skipGlobalContexts: true` drops
+    /// user_context + core_action (useful when the caller is overriding).
+    private func buildEntities(forEventName name: String,
+                               screen: String?,
+                               elementKey: String?,
+                               extra: [SelfDescribingJson]?,
+                               skipGlobalContexts: Bool) -> [SelfDescribingJson] {
+        var out: [SelfDescribingJson] = []
+        if !skipGlobalContexts {
+            if let userRaw = entities["user_context"],
+               let userSchema = normalizeEntityURI(userRaw),
+               !userContext.isEmpty {
+                out.append(SelfDescribingJson(schema: userSchema, andData: userContext))
+            }
+            if let coreRaw = entities["core_action"],
+               let coreSchema = normalizeEntityURI(coreRaw) {
+                var data: [String: Any] = [
+                    "action_name": name,
+                    "timestamp":   isoNow(),
+                ]
+                if let screen = screen, !screen.isEmpty       { data["screen"]      = screen }
+                if let key    = elementKey, !key.isEmpty      { data["element_key"] = key }
+                out.append(SelfDescribingJson(schema: coreSchema, andData: data))
+            }
+        }
+        if let extra = extra { out.append(contentsOf: extra) }
+        return out
+    }
+
+    private func isoNow() -> String {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f.string(from: Date())
+    }
+
+    /// Internal: fire one self-describing event under `schema` with the
+    /// configured auto-entities + caller's extras. Logs the envelope so the
+    /// integrator can verify shape during development.
+    private func trackSelfDescribing(schema: String,
+                                     eventName: String,
+                                     data: [String: Any],
+                                     extraContexts: [SelfDescribingJson]?,
+                                     skipGlobalContexts: Bool) {
+        guard let tracker = tracker else {
+            NSLog("[UniTrackSnowplow] SKIP \"\(eventName)\" — tracker not initialized")
+            return
+        }
+        let cleaned = data.filter { !$0.key.hasPrefix("_") }
+        let screen     = (cleaned["screen"]      ?? cleaned["screen_name"]) as? String
+        let elementKey = (cleaned["element_key"] ?? cleaned["element"])     as? String
+        let ctxs = buildEntities(forEventName: eventName,
+                                 screen: screen, elementKey: elementKey,
+                                 extra: extraContexts,
+                                 skipGlobalContexts: skipGlobalContexts)
+        let ev = SelfDescribing(schema: schema, payload: cleaned)
+        _ = ev.entities(ctxs)
+        tracker.track(ev)
+        Self.logTracking(endpoint: endpoint, eventName: eventName,
+                         schema: schema, data: cleaned, contexts: ctxs)
+    }
+
+    // MARK: - Snowplow built-in event helpers
+    // Five typed events Snowplow's tracker SDK already models. Each attaches
+    // the same global entities as the convention helpers via buildEntities().
+
+    public func trackTiming(category: String, variable: String, timing: Int,
+                            label: String? = nil,
+                            extraContexts: [SelfDescribingJson]? = nil,
+                            skipGlobalContexts: Bool = false) {
+        guard let tracker = tracker else { return }
+        let ev = Timing(category: category, variable: variable, timing: timing)
+        ev.label = label
+        _ = ev.entities(buildEntities(forEventName: "timing", screen: nil,
+                                      elementKey: nil, extra: extraContexts,
+                                      skipGlobalContexts: skipGlobalContexts))
+        tracker.track(ev)
+    }
+
+    public func trackEcommerceTransaction(orderId: String, totalValue: Double,
+                                          items: [EcommerceItem],
+                                          affiliation: String? = nil,
+                                          taxValue: Double? = nil,
+                                          shipping: Double? = nil,
+                                          city: String? = nil,
+                                          state: String? = nil,
+                                          country: String? = nil,
+                                          currency: String? = nil,
+                                          extraContexts: [SelfDescribingJson]? = nil,
+                                          skipGlobalContexts: Bool = false) {
+        guard let tracker = tracker else { return }
+        let ev = Ecommerce(orderId: orderId, totalValue: totalValue, items: items)
+        ev.affiliation = affiliation
+        ev.taxValue    = taxValue.map { NSNumber(value: $0) }
+        ev.shipping    = shipping.map { NSNumber(value: $0) }
+        ev.city        = city
+        ev.state       = state
+        ev.country     = country
+        ev.currency    = currency
+        _ = ev.entities(buildEntities(forEventName: "ecommerce_transaction",
+                                      screen: nil, elementKey: nil,
+                                      extra: extraContexts,
+                                      skipGlobalContexts: skipGlobalContexts))
+        tracker.track(ev)
+    }
+
+    public func trackMessageNotification(title: String, body: String,
+                                         trigger: MessageNotificationTrigger = .push,
+                                         notificationTimestamp: String? = nil,
+                                         category: String? = nil,
+                                         action: String? = nil,
+                                         sound: String? = nil,
+                                         extraContexts: [SelfDescribingJson]? = nil,
+                                         skipGlobalContexts: Bool = false) {
+        guard let tracker = tracker else { return }
+        let ev = MessageNotification(title: title, body: body, trigger: trigger)
+        ev.notificationTimestamp = notificationTimestamp
+        ev.category = category
+        ev.action   = action
+        ev.sound    = sound
+        _ = ev.entities(buildEntities(forEventName: "message_notification",
+                                      screen: nil, elementKey: nil,
+                                      extra: extraContexts,
+                                      skipGlobalContexts: skipGlobalContexts))
+        tracker.track(ev)
+    }
+
+    public func trackDeepLink(url: String, referrer: String? = nil,
+                              extraContexts: [SelfDescribingJson]? = nil,
+                              skipGlobalContexts: Bool = false) {
+        guard let tracker = tracker else { return }
+        let ev = DeepLinkReceived(url: url)
+        ev.referrer = referrer
+        _ = ev.entities(buildEntities(forEventName: "deep_link_received",
+                                      screen: nil, elementKey: nil,
+                                      extra: extraContexts,
+                                      skipGlobalContexts: skipGlobalContexts))
+        tracker.track(ev)
+    }
+
+    public func trackConsentGranted(expiry: String, documentId: String,
+                                    documentVersion: String,
+                                    documentName: String? = nil,
+                                    documentDescription: String? = nil,
+                                    extraContexts: [SelfDescribingJson]? = nil,
+                                    skipGlobalContexts: Bool = false) {
+        guard let tracker = tracker else { return }
+        let ev = ConsentGranted(expiry: expiry, documentId: documentId, version: documentVersion)
+        ev.name = documentName
+        ev.documentDescription = documentDescription
+        _ = ev.entities(buildEntities(forEventName: "consent_granted",
+                                      screen: nil, elementKey: nil,
+                                      extra: extraContexts,
+                                      skipGlobalContexts: skipGlobalContexts))
+        tracker.track(ev)
+    }
+
+    public func trackConsentWithdrawn(all: Bool,
+                                      documentId: String? = nil,
+                                      documentVersion: String? = nil,
+                                      documentName: String? = nil,
+                                      documentDescription: String? = nil,
+                                      extraContexts: [SelfDescribingJson]? = nil,
+                                      skipGlobalContexts: Bool = false) {
+        guard let tracker = tracker else { return }
+        let ev = ConsentWithdrawn()
+        ev.all = all
+        ev.documentId = documentId
+        ev.version    = documentVersion
+        ev.name       = documentName
+        ev.documentDescription = documentDescription
+        _ = ev.entities(buildEntities(forEventName: "consent_withdrawn",
+                                      screen: nil, elementKey: nil,
+                                      extra: extraContexts,
+                                      skipGlobalContexts: skipGlobalContexts))
+        tracker.track(ev)
+    }
+
+    /// Self-describing event with caller-provided schema. Skips the convention
+    /// schema builder; auto-entities still attach unless skipGlobalContexts.
+    public func trackSelfDescribing(schema: String, data: [String: Any],
+                                    extraContexts: [SelfDescribingJson]? = nil,
+                                    skipGlobalContexts: Bool = false) {
+        // Route through the internal helper so the log envelope is uniform.
+        let nameHint = (data["action_name"] ?? data["event_name"]) as? String ?? "self_describing"
+        trackSelfDescribing(schema: schema, eventName: nameHint, data: data,
+                            extraContexts: extraContexts,
+                            skipGlobalContexts: skipGlobalContexts)
+    }
+
+    // MARK: - Convention helpers (app-facing)
+
+    public func trackingClickEvent(elementKey: String, label: String? = nil,
+                                   screen: String? = nil, data: [String: Any]? = nil,
+                                   extraContexts: [SelfDescribingJson]? = nil,
+                                   skipGlobalContexts: Bool = false) {
+        let name = resolveEventName(kind: "click", defaultName: "event_click")
+        guard let schema = schemaFor(eventName: name) else { return }
+        var payload: [String: Any] = ["element_key": elementKey]
+        if let label  = label  { payload["label"]  = label }
+        if let screen = screen { payload["screen"] = screen }
+        if let data   = data   { payload.merge(data) { _, new in new } }
+        trackSelfDescribing(schema: schema, eventName: name, data: payload,
+                            extraContexts: extraContexts,
+                            skipGlobalContexts: skipGlobalContexts)
+    }
+
+    public func trackingResultEvent(action: String, status: String,
+                                    errorCode: String? = nil, errorMessage: String? = nil,
+                                    durationMs: Int? = nil, data: [String: Any]? = nil,
+                                    extraContexts: [SelfDescribingJson]? = nil,
+                                    skipGlobalContexts: Bool = false) {
+        let name = resolveEventName(kind: "result", defaultName: "event_result")
+        guard let schema = schemaFor(eventName: name) else { return }
+        var payload: [String: Any] = ["action": action, "status": status]
+        if let errorCode    = errorCode    { payload["error_code"]    = errorCode }
+        if let errorMessage = errorMessage { payload["error_message"] = errorMessage }
+        if let durationMs   = durationMs   { payload["duration_ms"]   = durationMs }
+        if let data         = data         { payload.merge(data) { _, new in new } }
+        trackSelfDescribing(schema: schema, eventName: name, data: payload,
+                            extraContexts: extraContexts,
+                            skipGlobalContexts: skipGlobalContexts)
+    }
+
+    /// Convention event for entering a screen. Emits BOTH the Snowplow native
+    /// ScreenView (sessionization, screen context) AND a SelfDescribing
+    /// `event_screen_view` against the team vendor — one call, two payloads.
+    public func trackingScreenView(screenName: String, fromScreen: String? = nil,
+                                   data: [String: Any]? = nil,
+                                   extraContexts: [SelfDescribingJson]? = nil,
+                                   skipGlobalContexts: Bool = false) {
+        guard let tracker = tracker else { return }
+        let sv = ScreenView(name: screenName)
+        _ = sv.entities(buildEntities(forEventName: "screen_view",
+                                      screen: screenName, elementKey: nil,
+                                      extra: nil,
+                                      skipGlobalContexts: skipGlobalContexts))
+        tracker.track(sv)
+        let name = resolveEventName(kind: "screen_view", defaultName: "event_screen_view")
+        guard let schema = schemaFor(eventName: name) else { return }
+        var payload: [String: Any] = ["screen_name": screenName, "screen": screenName]
+        if let fromScreen = fromScreen { payload["from_screen"] = fromScreen }
+        if let data       = data       { payload.merge(data) { _, new in new } }
+        trackSelfDescribing(schema: schema, eventName: name, data: payload,
+                            extraContexts: extraContexts,
+                            skipGlobalContexts: skipGlobalContexts)
+    }
+
+    public func trackingCrash(message: String, stack: String? = nil,
+                              fatal: Bool = true, type: String? = nil,
+                              data: [String: Any]? = nil,
+                              extraContexts: [SelfDescribingJson]? = nil,
+                              skipGlobalContexts: Bool = false) {
+        let name = resolveEventName(kind: "crash", defaultName: "event_crash")
+        guard let schema = schemaFor(eventName: name) else { return }
+        var payload: [String: Any] = ["message": message, "fatal": fatal]
+        if let stack = stack { payload["stack"] = stack }
+        if let type  = type  { payload["type"]  = type }
+        if let data  = data  { payload.merge(data) { _, new in new } }
+        trackSelfDescribing(schema: schema, eventName: name, data: payload,
+                            extraContexts: extraContexts,
+                            skipGlobalContexts: skipGlobalContexts)
+    }
+
+    public func trackingAPI(url: String, method: String, status: Int, durationMs: Int,
+                            requestBytes: Int? = nil, responseBytes: Int? = nil,
+                            errorMessage: String? = nil, data: [String: Any]? = nil,
+                            extraContexts: [SelfDescribingJson]? = nil,
+                            skipGlobalContexts: Bool = false) {
+        let name = resolveEventName(kind: "api", defaultName: "event_api")
+        guard let schema = schemaFor(eventName: name) else { return }
+        var payload: [String: Any] = [
+            "url": url, "method": method, "status": status, "duration_ms": durationMs,
+        ]
+        if let requestBytes  = requestBytes  { payload["request_bytes"]  = requestBytes }
+        if let responseBytes = responseBytes { payload["response_bytes"] = responseBytes }
+        if let errorMessage  = errorMessage  { payload["error_message"]  = errorMessage }
+        if let data          = data          { payload.merge(data) { _, new in new } }
+        trackSelfDescribing(schema: schema, eventName: name, data: payload,
+                            extraContexts: extraContexts,
+                            skipGlobalContexts: skipGlobalContexts)
+    }
+
+    /// Escape hatch — for one-off events not (yet) lifted into a typed helper.
+    /// Schema is built the same way: iglu:<vendor>/<eventName>/jsonschema/<version>.
+    public func trackingCustomEvent(_ eventName: String, data: [String: Any]? = nil,
+                                    extraContexts: [SelfDescribingJson]? = nil,
+                                    skipGlobalContexts: Bool = false) {
+        guard let schema = schemaFor(eventName: eventName) else { return }
+        trackSelfDescribing(schema: schema, eventName: eventName,
+                            data: data ?? [:],
+                            extraContexts: extraContexts,
+                            skipGlobalContexts: skipGlobalContexts)
+    }
+
+    // MARK: - Pretty log envelope (verbose only)
+
+    private static func logTracking(endpoint: String, eventName: String,
+                                    schema: String, data: [String: Any],
+                                    contexts: [SelfDescribingJson]) {
+        guard UniTrack.verboseLogging else { return }
+        let ctxsArr: [[String: Any]] = contexts.map { ["schema": $0.schema, "data": $0.data] }
+        let envelope: [String: Any] = [
+            "endpoint": endpoint,
+            "method":   "trackSelfDescribingEvent",
+            "event":    ["schema": schema, "data": data],
+            "contexts": ctxsArr,
+        ]
+        UniTrack.log("\n─── Snowplow Tracking ───  (convention event=\"%@\")\n%@",
+                     eventName, prettyJSON(envelope))
+    }
+
+    private static func prettyJSON(_ value: Any) -> String {
+        if JSONSerialization.isValidJSONObject(value),
+           let data = try? JSONSerialization.data(withJSONObject: value,
+                                                  options: [.prettyPrinted, .sortedKeys]),
+           let s = String(data: data, encoding: .utf8) {
+            return s
+        }
+        return "<unserializable>"
     }
 }
 #else
-// SnowplowTracker not linked — provide a stub so the file still compiles if the
-// pod is present without its dependency (shouldn't happen in normal use).
+// Fallback when the SnowplowTracker pod is missing from the integrator's
+// Podfile (rare — CocoaPods normally auto-pulls it via our podspec). All
+// methods are no-ops + initializeProvider() logs a one-line warning, so the
+// app still compiles + boots; tracking just silently doesn't reach Snowplow.
 public final class SnowplowProvider: AnalyticsProvider {
     public init(endpoint: String, appId: String, namespace: String = "UniTrack",
-                userContext: [String: Any]? = nil, userContextSchema: String? = nil,
-                schemas: [String: String] = [:]) {}
+                userContext: [String: Any] = [:],
+                options: SnowplowOptions = SnowplowOptions(),
+                igluVendor: String? = nil,
+                defaultVersion: String = "1-0-0",
+                eventNames: [String: String] = [:],
+                entities: [String: String] = [:]) {}
     public func initializeProvider() {
         NSLog("[UniTrackSnowplow] SnowplowTracker not available")
     }
+    public func updateUserContext(_ ctx: [String: Any]) {}
+    public func setEventNames(_ map: [String: String]) {}
+    public func setEntities(_ map: [String: String]) {}
     public func track(_ name: String, _ properties: [String: Any]) {}
     public func setUser(_ userId: String?, _ traits: [String: Any]) {}
     public func setScreen(_ name: String) {}
+    public func trackTiming(category: String, variable: String, timing: Int,
+                            label: String? = nil, extraContexts: [Any]? = nil,
+                            skipGlobalContexts: Bool = false) {}
+    public func trackEcommerceTransaction(orderId: String, totalValue: Double,
+                                          items: [Any], affiliation: String? = nil,
+                                          taxValue: Double? = nil, shipping: Double? = nil,
+                                          city: String? = nil, state: String? = nil,
+                                          country: String? = nil, currency: String? = nil,
+                                          extraContexts: [Any]? = nil,
+                                          skipGlobalContexts: Bool = false) {}
+    public func trackMessageNotification(title: String, body: String,
+                                         extraContexts: [Any]? = nil,
+                                         skipGlobalContexts: Bool = false) {}
+    public func trackDeepLink(url: String, referrer: String? = nil,
+                              extraContexts: [Any]? = nil,
+                              skipGlobalContexts: Bool = false) {}
+    public func trackConsentGranted(expiry: String, documentId: String,
+                                    documentVersion: String,
+                                    extraContexts: [Any]? = nil,
+                                    skipGlobalContexts: Bool = false) {}
+    public func trackConsentWithdrawn(all: Bool, extraContexts: [Any]? = nil,
+                                      skipGlobalContexts: Bool = false) {}
+    public func trackSelfDescribing(schema: String, data: [String: Any],
+                                    extraContexts: [Any]? = nil,
+                                    skipGlobalContexts: Bool = false) {}
+    public func trackingClickEvent(elementKey: String, label: String? = nil,
+                                   screen: String? = nil, data: [String: Any]? = nil,
+                                   extraContexts: [Any]? = nil,
+                                   skipGlobalContexts: Bool = false) {}
+    public func trackingResultEvent(action: String, status: String,
+                                    errorCode: String? = nil, errorMessage: String? = nil,
+                                    durationMs: Int? = nil, data: [String: Any]? = nil,
+                                    extraContexts: [Any]? = nil,
+                                    skipGlobalContexts: Bool = false) {}
+    public func trackingScreenView(screenName: String, fromScreen: String? = nil,
+                                   data: [String: Any]? = nil,
+                                   extraContexts: [Any]? = nil,
+                                   skipGlobalContexts: Bool = false) {}
+    public func trackingCrash(message: String, stack: String? = nil,
+                              fatal: Bool = true, type: String? = nil,
+                              data: [String: Any]? = nil,
+                              extraContexts: [Any]? = nil,
+                              skipGlobalContexts: Bool = false) {}
+    public func trackingAPI(url: String, method: String, status: Int, durationMs: Int,
+                            requestBytes: Int? = nil, responseBytes: Int? = nil,
+                            errorMessage: String? = nil, data: [String: Any]? = nil,
+                            extraContexts: [Any]? = nil,
+                            skipGlobalContexts: Bool = false) {}
+    public func trackingCustomEvent(_ eventName: String, data: [String: Any]? = nil,
+                                    extraContexts: [Any]? = nil,
+                                    skipGlobalContexts: Bool = false) {}
 }
 #endif
