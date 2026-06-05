@@ -208,3 +208,41 @@ public final class FirebaseProvider: AnalyticsProvider {
     public func setScreen(_ name: String) {}
 }
 #endif
+
+// MARK: - Remote config bridge (Firebase RemoteConfig → UniTrack)
+
+#if canImport(FirebaseRemoteConfig)
+import FirebaseRemoteConfig
+
+/// FirebaseProvider doubles as a fallback for `UniTrack.getRemoteValue(...)`:
+/// after the portal `sdk_config.custom_values` lookup misses, the resolver
+/// asks each provider that conforms here. Returns nil for unknown keys so
+/// the resolver moves on to the caller's defaultValue.
+extension FirebaseProvider: RemoteValueProvider {
+    public func getRemoteValue<T>(_ key: String) -> T? {
+        // RemoteConfig.configValue(forKey:) always returns a value object
+        // even for unknown keys (with `.source == .static`). Skip those so we
+        // don't shadow the caller's default with Firebase's zero-value.
+        let v = RemoteConfig.remoteConfig().configValue(forKey: key)
+        guard v.source != .static else { return nil }
+        if T.self == String.self { return v.stringValue as? T }
+        if T.self == Int.self    { return v.numberValue.intValue as? T }
+        if T.self == Double.self { return v.numberValue.doubleValue as? T }
+        if T.self == Bool.self   { return v.boolValue as? T }
+        return nil
+    }
+}
+
+public extension FirebaseProvider {
+    /// Convenience around `RemoteConfig.fetchAndActivate`. Call once at app
+    /// startup (after `UniTrack.initialize`) so RC has values to serve when
+    /// the resolver falls through to it. Completion fires on the main thread.
+    static func fetchRemoteConfig(completion: ((Bool) -> Void)? = nil) {
+        RemoteConfig.remoteConfig().fetchAndActivate { status, error in
+            let ok = error == nil &&
+                (status == .successFetchedFromRemote || status == .successUsingPreFetchedData)
+            DispatchQueue.main.async { completion?(ok) }
+        }
+    }
+}
+#endif
