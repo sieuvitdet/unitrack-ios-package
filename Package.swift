@@ -45,17 +45,14 @@ let package = Package(
         .target(
             name: "UniTrack",
             dependencies: ["UniTrackCore"],
-            path: "Sources/UniTrack",
-            swiftSettings: [
-                // The module ("UniTrack") and its main class ("UniTrack") share a
-                // name. When emitting the module interface for library evolution
-                // (BUILD_LIBRARY_FOR_DISTRIBUTION=YES, used by xcframework /
-                // CocoaPods builds), the verifier reads "UniTrack.Config" as a
-                // member of the class instead of the module type and fails. This
-                // flag aliases the module name in the emitted interface so those
-                // references resolve unambiguously.
-                .unsafeFlags(["-alias-module-names-in-module-interface"])
-            ]
+            path: "Sources/UniTrack"
+            // No unsafeFlags here — SPM forbids downstream packages from depending
+            // on a package that uses .unsafeFlags, so any app that imports this
+            // package as a dependency (vd FPT Life) hits "cannot be used as a
+            // dependency because it uses unsafe build flags". The
+            // -alias-module-names-in-module-interface flag was only needed when
+            // building an xcframework with BUILD_LIBRARY_FOR_DISTRIBUTION=YES;
+            // for regular SPM consumption it's unnecessary.
         ),
         .target(
             name: "UniTrackFirebase",
