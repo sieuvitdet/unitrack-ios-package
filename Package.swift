@@ -59,6 +59,14 @@ let package = Package(
             dependencies: [
                 "UniTrack",
                 .product(name: "FirebaseAnalytics", package: "firebase-ios-sdk"),
+                // Optional Firebase modules — each helper inside this target is
+                // wrapped in `#if canImport(...)` so an app that doesn't link a
+                // given module still builds. We DO declare them here so a SPM
+                // consumer pulling UniTrackFirebase gets all four products
+                // available without having to add them one-by-one.
+                .product(name: "FirebaseMessaging",    package: "firebase-ios-sdk"),
+                .product(name: "FirebaseCrashlytics",  package: "firebase-ios-sdk"),
+                .product(name: "FirebaseRemoteConfig", package: "firebase-ios-sdk"),
             ],
             path: "Sources/UniTrackFirebase"
         ),
