@@ -17,7 +17,23 @@ let package = Package(
         .library(name: "UniTrackSnowplow", targets: ["UniTrackSnowplow"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/firebase/firebase-ios-sdk.git", from: "10.0.0"),
+        // Firebase pinned to a range that matches the version FPT Life
+        // already ships via CocoaPods (10.27.0). Without the pin, SwiftPM
+        // would pull the latest 10.x (vd 10.29.0) and the app linker would
+        // end up with TWO copies of every Firebase symbol — one from Pods,
+        // one from .swiftpm/checkouts — bloating the binary by ~5-8 MB and
+        // risking duplicate-symbol crashes (especially in the Crashlytics
+        // signal handler).
+        //
+        // App-side requirement: pick ONE package manager for Firebase.
+        //   • If CocoaPods owns Firebase → comment out the
+        //     `.product(name: "FirebaseAnalytics", ...)` lines in the app's
+        //     Xcode target's "Frameworks, Libraries, and Embedded Content"
+        //     so the linker doesn't pull the SPM copy.
+        //   • If SPM owns Firebase → remove the 4 `pod 'Firebase/...'`
+        //     entries from the Podfile + `pod install`.
+        // Never both at the same major version range.
+        .package(url: "https://github.com/firebase/firebase-ios-sdk.git", "10.27.0"..<"10.30.0"),
         .package(url: "https://github.com/snowplow/snowplow-ios-tracker.git", from: "6.0.0"),
     ],
     targets: [
@@ -61,9 +77,7 @@ let package = Package(
                 .product(name: "FirebaseAnalytics", package: "firebase-ios-sdk"),
                 // Optional Firebase modules — each helper inside this target is
                 // wrapped in `#if canImport(...)` so an app that doesn't link a
-                // given module still builds. We DO declare them here so a SPM
-                // consumer pulling UniTrackFirebase gets all four products
-                // available without having to add them one-by-one.
+                // given module still builds.
                 .product(name: "FirebaseMessaging",    package: "firebase-ios-sdk"),
                 .product(name: "FirebaseCrashlytics",  package: "firebase-ios-sdk"),
                 .product(name: "FirebaseRemoteConfig", package: "firebase-ios-sdk"),
