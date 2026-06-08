@@ -7,3 +7,6 @@ DerivedData/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
 *.xcodeproj
+
+# Internal build scripts — not for distribution
+scripts/
