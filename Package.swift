@@ -17,23 +17,28 @@ let package = Package(
         .library(name: "UniTrackSnowplow", targets: ["UniTrackSnowplow"]),
     ],
     dependencies: [
-        // Firebase pinned to a range that matches the version FPT Life
-        // already ships via CocoaPods (10.27.0). Without the pin, SwiftPM
-        // would pull the latest 10.x (vd 10.29.0) and the app linker would
-        // end up with TWO copies of every Firebase symbol — one from Pods,
-        // one from .swiftpm/checkouts — bloating the binary by ~5-8 MB and
-        // risking duplicate-symbol crashes (especially in the Crashlytics
-        // signal handler).
+        // Firebase pinned tight to 10.27.x.
+        //
+        // SPM requires every imported module to have a declared target
+        // dependency, even when wrapped in `#if canImport(...)` — so we
+        // can't drop the Firebase package entirely. The tight pin keeps
+        // the resolved version EXACTLY matching what FPT Life production
+        // ships via CocoaPods (Firebase 10.27.0), so the linker doesn't
+        // end up with two diverged Firebase trees and duplicate symbols.
+        //
+        // Earlier 0.3.19 used `..<"10.30.0"` which SwiftPM resolved up to
+        // 10.29.0 — pulling in 14 transitive Google/abseil/gRPC packages
+        // (visible in any consuming app's Package Dependencies pane).
+        // 10.27.0 has a leaner tree + matches the Pods version exactly.
         //
         // App-side requirement: pick ONE package manager for Firebase.
-        //   • If CocoaPods owns Firebase → comment out the
-        //     `.product(name: "FirebaseAnalytics", ...)` lines in the app's
-        //     Xcode target's "Frameworks, Libraries, and Embedded Content"
-        //     so the linker doesn't pull the SPM copy.
-        //   • If SPM owns Firebase → remove the 4 `pod 'Firebase/...'`
-        //     entries from the Podfile + `pod install`.
-        // Never both at the same major version range.
-        .package(url: "https://github.com/firebase/firebase-ios-sdk.git", "10.27.0"..<"10.30.0"),
+        //   • If CocoaPods owns Firebase 10.27.0 → remove the 4 SPM
+        //     Firebase products from the app target's "Frameworks,
+        //     Libraries, and Embedded Content" so the linker uses Pods.
+        //   • If SPM owns Firebase → remove the `pod 'Firebase/...'`
+        //     entries from the Podfile.
+        // Never both.
+        .package(url: "https://github.com/firebase/firebase-ios-sdk.git", "10.27.0"..<"10.28.0"),
         .package(url: "https://github.com/snowplow/snowplow-ios-tracker.git", from: "6.0.0"),
     ],
     targets: [
@@ -77,7 +82,10 @@ let package = Package(
                 .product(name: "FirebaseAnalytics", package: "firebase-ios-sdk"),
                 // Optional Firebase modules — each helper inside this target is
                 // wrapped in `#if canImport(...)` so an app that doesn't link a
-                // given module still builds.
+                // given module still builds. Apps DO need them as SPM product
+                // links here so the modules are resolvable to the Swift
+                // compiler (SwiftPM's import resolution doesn't honour
+                // canImport — only the linker step does).
                 .product(name: "FirebaseMessaging",    package: "firebase-ios-sdk"),
                 .product(name: "FirebaseCrashlytics",  package: "firebase-ios-sdk"),
                 .product(name: "FirebaseRemoteConfig", package: "firebase-ios-sdk"),
