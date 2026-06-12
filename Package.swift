@@ -17,29 +17,21 @@ let package = Package(
         .library(name: "UniTrackSnowplow", targets: ["UniTrackSnowplow"]),
     ],
     dependencies: [
-        // Firebase pinned tight to 10.27.x.
-        //
-        // SPM requires every imported module to have a declared target
-        // dependency, even when wrapped in `#if canImport(...)` — so we
-        // can't drop the Firebase package entirely. The tight pin keeps
-        // the resolved version EXACTLY matching what FPT Life production
-        // ships via CocoaPods (Firebase 10.27.0), so the linker doesn't
-        // end up with two diverged Firebase trees and duplicate symbols.
-        //
-        // Earlier 0.3.19 used `..<"10.30.0"` which SwiftPM resolved up to
-        // 10.29.0 — pulling in 14 transitive Google/abseil/gRPC packages
-        // (visible in any consuming app's Package Dependencies pane).
-        // 10.27.0 has a leaner tree + matches the Pods version exactly.
-        //
-        // App-side requirement: pick ONE package manager for Firebase.
-        //   • If CocoaPods owns Firebase 10.27.0 → remove the 4 SPM
-        //     Firebase products from the app target's "Frameworks,
-        //     Libraries, and Embedded Content" so the linker uses Pods.
-        //   • If SPM owns Firebase → remove the `pod 'Firebase/...'`
-        //     entries from the Podfile.
-        // Never both.
-        .package(url: "https://github.com/firebase/firebase-ios-sdk.git", "10.27.0"..<"10.28.0"),
+        // Snowplow is fetched + linked by SPM — apps don't bring their own.
         .package(url: "https://github.com/snowplow/snowplow-ios-tracker.git", from: "6.0.0"),
+        // NOTE: NO Firebase dependency declared here. Earlier versions pulled
+        // firebase-ios-sdk directly, which collided with apps that already
+        // ship Firebase via CocoaPods — Clang's module scanner fails with
+        // "redefinition of module 'Firebase'" when the same module shows up
+        // under two source trees.
+        //
+        // Instead, UniTrackFirebase imports FirebaseAnalytics via
+        // `#if canImport(FirebaseAnalytics)` — the app is REQUIRED to provide
+        // FirebaseAnalytics through one of:
+        //   • CocoaPods: pod 'Firebase/Analytics', '10.27.0'
+        //   • SPM:       add firebase-ios-sdk to the app target directly
+        // Without either, FirebaseProvider compiles into a no-op shell that
+        // logs "FirebaseAnalytics not available" and ignores tracking calls.
     ],
     targets: [
         // C/C++ core, vendored as real source files (copied from the monorepo's
@@ -67,29 +59,13 @@ let package = Package(
             name: "UniTrack",
             dependencies: ["UniTrackCore"],
             path: "Sources/UniTrack"
-            // No unsafeFlags here — SPM forbids downstream packages from depending
-            // on a package that uses .unsafeFlags, so any app that imports this
-            // package as a dependency (vd FPT Life) hits "cannot be used as a
-            // dependency because it uses unsafe build flags". The
-            // -alias-module-names-in-module-interface flag was only needed when
-            // building an xcframework with BUILD_LIBRARY_FOR_DISTRIBUTION=YES;
-            // for regular SPM consumption it's unnecessary.
         ),
         .target(
             name: "UniTrackFirebase",
-            dependencies: [
-                "UniTrack",
-                .product(name: "FirebaseAnalytics", package: "firebase-ios-sdk"),
-                // Optional Firebase modules — each helper inside this target is
-                // wrapped in `#if canImport(...)` so an app that doesn't link a
-                // given module still builds. Apps DO need them as SPM product
-                // links here so the modules are resolvable to the Swift
-                // compiler (SwiftPM's import resolution doesn't honour
-                // canImport — only the linker step does).
-                .product(name: "FirebaseMessaging",    package: "firebase-ios-sdk"),
-                .product(name: "FirebaseCrashlytics",  package: "firebase-ios-sdk"),
-                .product(name: "FirebaseRemoteConfig", package: "firebase-ios-sdk"),
-            ],
+            // Only depends on UniTrack. FirebaseAnalytics resolves via
+            // canImport at compile time — provided by the consuming app's
+            // own Firebase setup (Pods or SPM, whichever the app picked).
+            dependencies: ["UniTrack"],
             path: "Sources/UniTrackFirebase"
         ),
         .target(
