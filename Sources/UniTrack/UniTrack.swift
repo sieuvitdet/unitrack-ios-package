@@ -143,25 +143,6 @@ public final class UniTrack {
         return String(cString: cstr)
     }
 
-    /// tracking_id — UUID minted 1:1 with currentSessionId(). A fresh UUID is
-    /// generated on every rotation (cold start, timeout, manual rotateSession),
-    /// persisted alongside the session id, and stamped on every Snowplow
-    /// payload so Portal's mapping (user → session_id → tracking_id) can
-    /// pivot a lookup back to the full Snowplow event timeline.
-    public static func currentTrackingId() -> String {
-        guard let ctx = shared.context else { return "" }
-        guard let cstr = ut_current_tracking_id(ctx) else { return "" }
-        return String(cString: cstr)
-    }
-
-    /// tracking_id of the previous (just-closed) session — empty on the very
-    /// first session after install.
-    public static func previousTrackingId() -> String {
-        guard let ctx = shared.context else { return "" }
-        guard let cstr = ut_previous_tracking_id(ctx) else { return "" }
-        return String(cString: cstr)
-    }
-
     /// Force a session rotation right now. Bumps sessionIndex(), mints a new
     /// currentSessionId(), stamps the just-closed session as previousSessionId().
     ///
@@ -509,6 +490,22 @@ public final class UniTrack {
         PendingQueue.shared.count()
     }
 
+    /// IDs of every registered HttpProvider — used by the remote-config
+    /// reconciler (UniTrackRemoteConfig.applyHttpProviders) to compute the
+    /// diff against Portal's desired list. Non-HttpProvider providers
+    /// (Snowplow, Firebase, app-supplied) are excluded.
+    public static func registeredHttpProviderIds() -> [String] {
+        shared.providers.compactMap { ($0 as? HttpProvider)?.providerId }
+    }
+
+    /// Remove a provider whose providerId matches `id`. Used by the
+    /// reconciler to drop providers no longer in Portal config + replace
+    /// providers whose endpoint/headers/format changed (remove + add).
+    /// No-op if no match — idempotent.
+    public static func removeProvider(byId id: String) {
+        shared.providers.removeAll { $0.providerId == id }
+    }
+
     /// Convenience: attach the built-in `FirebaseAdapter` that stamps UniTrack
     /// `session_id` onto every Firebase Analytics event via reflection — 0
     /// import of Firebase in UniTrack core. App can be missing Firebase: this
@@ -520,16 +517,11 @@ public final class UniTrack {
         if let a = FirebaseAdapter.create() { addProvider(a) }
     }
 
-    /// Convenience: register a built-in `HttpProvider` in one call. Use this
-    /// for Kibana / ELK / OpenSearch / FPT internal backend — UniTrack ships
-    /// the transport + retry + batch logic, the app only configures endpoint.
-    ///
-    ///     UniTrack.addHttpProvider(
-    ///         id: "kibana",
-    ///         endpoint: URL(string: "https://kibana.fpt.vn/_bulk")!,
-    ///         format: .elasticBulk,
-    ///         headers: ["Authorization": "ApiKey ..."])
-    public static func addHttpProvider(
+    /// Register a built-in `HttpProvider`. Internal — call site is the remote
+    /// config reconciler (`UniTrackRemoteConfig.applyHttpProviders`). Portal
+    /// is the only source of truth for custom HTTP backends so app code never
+    /// needs (and isn't allowed) to wire one by hand.
+    internal static func addHttpProvider(
         id: String,
         endpoint: URL,
         format: PayloadFormat = .jsonSingle,
