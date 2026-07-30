@@ -38,21 +38,29 @@ import SnowplowTracker
     @objc var urlEndpoint: URL? { inner.urlEndpoint }
 
     @objc func sendRequests(_ requests: [Request]) -> [RequestResult] {
-        // Body of every batch was logged here previously — useful for
-        // first-time wiring, noise after that (the same JSON is already in
-        // the "─── Snowplow Tracking ───" envelope UniTrack logs at the
-        // convention layer). Keep only the wire outcome so 400/-1 failures
-        // still surface immediately.
         let results = inner.sendRequests(requests)
 
         for (i, result) in results.enumerated() {
-            let status = result.statusCode ?? -1
+            let status  = result.statusCode ?? -1
             let outcome = result.isSuccessful ? "OK" : "FAIL"
-            UniTrack.log("[UniTrackSnowplow→net] %@ %d batch=%d/%d events=%d",
-                         outcome, status, i + 1, results.count,
-                         requests.indices.contains(i) ? requests[i].emitterEventIds.count : 0)
+            let req     = requests.indices.contains(i) ? requests[i] : nil
+            let evIds   = req?.emitterEventIds ?? []
+            UniTrack.log("[UniTrackSnowplow→net] %@ %d batch=%d/%d events=%d ids=[%@]",
+                         outcome, status, i + 1, results.count, evIds.count,
+                         evIds.map(String.init).joined(separator: ","))
+            // Dump full batch body when FAIL (any status) or when verbose is
+            // on. Without this, a 503/400 batch is opaque — you know it broke
+            // but not which event tripped the collector.
+            if !result.isSuccessful || UniTrack.verboseLogging, let req = req {
+                UniTrack.log("[UniTrackSnowplow→net] %@ %d body=\n%@",
+                             outcome, status, Self.requestJSON(req))
+            }
         }
         return results
+    }
+
+    private static func requestJSON(_ request: Request) -> String {
+        return payloadJSON(request.payload)
     }
 
     // MARK: - Internals
