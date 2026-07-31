@@ -318,12 +318,12 @@ public final class SnowplowProvider: AnalyticsProvider {
     }
 
     public func setScreen(_ name: String) {
-        guard let tracker = tracker else { return }
-        let sv = ScreenView(name: name)
-        _ = sv.entities(buildEntities(forEventName: name, screen: name,
-                                      elementKey: nil, extra: nil,
-                                      skipGlobalContexts: false))
-        tracker.track(sv)
+        // No-op — firing Snowplow's builtin ScreenView(name:) here emits a
+        // second event under vendor `com.snowplowanalytics.mobile/screen_view`
+        // alongside UniTrack's own FPT-vendor `f_screen_view` (dispatched via
+        // track("screen_viewed", ...)). The data team queries the FPT vendor
+        // only; the builtin duplicate just adds noise. Keep the method so
+        // AnalyticsProvider protocol still compiles.
     }
 
     // MARK: - Convention schema/entity plumbing
