@@ -324,6 +324,7 @@ public final class SnowplowProvider: AnalyticsProvider {
         // track("screen_viewed", ...)). The data team queries the FPT vendor
         // only; the builtin duplicate just adds noise. Keep the method so
         // AnalyticsProvider protocol still compiles.
+        UniTrack.log("[UniTrackSnowplow] setScreen no-op — builtin ScreenView(\"%@\") SUPPRESSED. Convention event fires via track() path.", name)
     }
 
     // MARK: - Convention schema/entity plumbing
@@ -770,8 +771,16 @@ public final class SnowplowProvider: AnalyticsProvider {
             "event":    ["schema": schema, "data": data],
             "contexts": ctxsArr,
         ]
-        UniTrack.log("\n─── Snowplow Tracking ───  (convention event=\"%@\")\n%@",
-                     eventName, prettyJSON(envelope))
+        // Screen family gets its own tag so filtering by "SCREEN-VIEW" in
+        // Xcode console isolates the exact events the data team asks about
+        // (screen_viewed / screen_exited / screen_load_completed all go
+        // through the same schema "screen_view").
+        let isScreen = schema.contains("/screen_view/")
+                       || eventName == "screen_view"
+                       || (data["event_action"] as? String)?.hasPrefix("screen_") == true
+        let tag = isScreen ? "SCREEN-VIEW" : "Snowplow Tracking"
+        UniTrack.log("\n─── %@ ───  (convention event=\"%@\")\n%@",
+                     tag, eventName, prettyJSON(envelope))
     }
 
     private static func prettyJSON(_ value: Any) -> String {
