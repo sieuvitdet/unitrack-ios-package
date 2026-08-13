@@ -218,7 +218,7 @@ public final class SnowplowProvider: AnalyticsProvider {
         tracker = Snowplow.createTracker(namespace: namespace,
                                          network: network,
                                          configurations: [trackerConfig, plugin])
-        NSLog("[UniTrackSnowplow] tracker ready (\(endpoint), appId=\(appId), vendor=\(igluVendor ?? "—"), version=\(defaultVersion), entities=\(entities.keys.sorted().joined(separator: ",")))")
+        NSLog("[UniTrackSnowplow] tracker ready (\(endpoint), appId=\(appId), vendor=\(igluVendor ?? "—"), version=\(defaultVersion), entities=\(entities.keys.sorted().joined(separator: ",")), hybridScreenView=\(hybridScreenView))")
     }
 
     /// Pull the short event name out of an iglu URI tail. Returns "" if the
