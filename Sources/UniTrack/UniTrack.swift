@@ -734,7 +734,13 @@ public final class UniTrack {
         var dwellMs: Int = 0
         shared.lastScreenLock.lock()
         previous = shared.lastScreen
-        if previous == name { previous = nil } // dedupe like the core does
+        // ponytail: 1-line dup guard. Cùng screen 2 lần liên tiếp (vd viewDidAppear
+        // fire lại sau khi pop popup, hoặc AppLifecycle bg→fg re-fire) → không có
+        // screen boundary thật → skip cả exit lẫn entry fan-out. Trước đây chỉ
+        // reset `previous = nil` để bỏ screen_exited, nhưng screen_viewed vẫn
+        // fire dup ở line 799. Giờ 1 flag, gate cả 2.
+        let isSameScreen = (previous == name)
+        if isSameScreen { previous = nil }
         if let prev = previous, !prev.isEmpty,
            let lastAt = shared.lastScreenAt {
             dwellMs = Int(now.timeIntervalSince(lastAt) * 1000.0)
@@ -796,7 +802,13 @@ public final class UniTrack {
             startPayload["from_screen"]          = prev
             startPayload["previous_screen_name"] = prev
         }
-        dispatchToProviders(shared.screenStartEventName, startPayload)
+        // Dup guard (see isSameScreen above): swizzler re-fires viewDidAppear
+        // sau khi pop popup / bg→fg → cùng name, không có screen boundary
+        // → không fan-out entry event nữa. FLI đang thấy screen_viewed dup ×2
+        // là do đúng path này.
+        if !isSameScreen {
+            dispatchToProviders(shared.screenStartEventName, startPayload)
+        }
     }
 
     public static func flush() {

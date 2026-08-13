@@ -126,15 +126,22 @@ public struct UniTrackRemoteConfig: Codable {
         /// when the data team hasn't published matching iglu schemas — the
         /// enricher would otherwise turn them into bad rows.
         public var dropEvents: [String]?
+        /// Hybrid ScreenView mode. Khi true, SnowplowProvider.setScreen(name)
+        /// fire Snowplow BUILTIN ScreenView (com.snowplowanalytics.mobile/
+        /// screen_view/1-0-0) + skip screen_viewed ở path SelfDescribing custom
+        /// vendor. screen_exited + screen_load_completed vẫn giữ custom vendor.
+        /// Default nil → false → behavior legacy (screen_viewed đi qua custom).
+        public var hybridScreenView: Bool?
         enum CodingKeys: String, CodingKey {
             case enabled, endpoint, appId, namespace, options
             case userContext
             case ios, android
-            case igluVendor     = "iglu_vendor"
-            case defaultVersion = "default_version"
-            case eventNames     = "event_names"
+            case igluVendor       = "iglu_vendor"
+            case defaultVersion   = "default_version"
+            case eventNames       = "event_names"
             case entities
-            case dropEvents     = "drop_events"
+            case dropEvents       = "drop_events"
+            case hybridScreenView = "hybrid_screen_view"
         }
     }
 
