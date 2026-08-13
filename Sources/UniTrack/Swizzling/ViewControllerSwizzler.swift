@@ -41,6 +41,29 @@ enum ViewControllerSwizzler {
 private var utLoadStartKey: UInt8 = 0
 private var utLoadReportedKey: UInt8 = 0
 
+// ponytail: cross-instance dedup cho screen_load_completed. Cùng class name
+// có thể có N instance sống song song (vd TabBar pager cell mỗi tab tạo 1
+// CameraHomeViewController) → mỗi instance report 1 lần load → portal thấy N
+// event `screen_load_completed` cho cùng screen name trong 1 giây. Guard
+// per-instance `ut_loadReported` không giải quyết được vì mỗi instance có
+// slot riêng. Dedup theo tên trong window 1s là đủ — user thấy screen
+// "CameraHomeViewController" 1 lần, không quan tâm 3 instance nội bộ.
+// Upgrade path: theo screen_id instead of name khi core stamp screen id
+// (chưa có).
+private let utLoadDedupLock = NSLock()
+private var utLoadDedupTimes: [String: CFTimeInterval] = [:]
+private let utLoadDedupWindowSec: CFTimeInterval = 1.0
+
+func utLoadShouldReport(_ screen: String) -> Bool {
+    utLoadDedupLock.lock(); defer { utLoadDedupLock.unlock() }
+    let now = CACurrentMediaTime()
+    if let last = utLoadDedupTimes[screen], now - last < utLoadDedupWindowSec {
+        return false
+    }
+    utLoadDedupTimes[screen] = now
+    return true
+}
+
 private extension UIViewController {
     var ut_loadStart: CFTimeInterval {
         get { (objc_getAssociatedObject(self, &utLoadStartKey) as? CFTimeInterval) ?? 0 }
@@ -136,7 +159,7 @@ private extension UIViewController {
         // Event name resolves from UniTrack.screenLoadEventName (set during
         // _initialize from config.screenLoadEvent, in turn from portal
         // `sdk_config.screen_load_event`). Default keeps "screen_load_completed".
-        if !ut_loadReported, ut_loadStart > 0 {
+        if !ut_loadReported, ut_loadStart > 0, utLoadShouldReport(screen) {
             ut_loadReported = true
             let ms = Int((CACurrentMediaTime() - ut_loadStart) * 1000)
             // is_cached heuristic: sub-100ms load = cache hit (view already
