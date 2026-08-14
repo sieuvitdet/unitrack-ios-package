@@ -83,6 +83,13 @@ enum AppLifecycleObserver {
             // so cold start (which already fired via viewDidAppear) doesn't
             // double-fire.
             if isResume, let current = UniTrack.previousScreenName(), !current.isEmpty {
+                // didEnterBackground đã fire screen_exited cho chính screen
+                // này, nên đây là boundary thật — nhưng lastScreen vẫn đang
+                // giữ `current`, khiến setScreen() thấy isSameScreen=true và
+                // nuốt mất screen_viewed. Clear trước để re-entry được fan-out
+                // đúng một lần. Chống-dup cho pop-popup không đổi vì path đó
+                // không đi qua background.
+                UniTrack.forgetLastScreen()
                 UniTrack.setScreen(current)
             }
             // Resolve the session — if background dwell exceeded the timeout,

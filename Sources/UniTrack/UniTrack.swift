@@ -113,6 +113,19 @@ public final class UniTrack {
         return shared.lastScreen
     }
 
+    /// Quên screen hiện tại để lần setScreen() kế tiếp được coi là boundary
+    /// thật. Gọi từ AppLifecycleObserver lúc resume: didEnterBackground đã
+    /// fire screen_exited cho top VC, nhưng lastScreen vẫn giữ tên đó, nên
+    /// setScreen() khi quay lại foreground sẽ bị dup guard (isSameScreen)
+    /// nuốt mất screen_viewed — screen đã exited mà không bao giờ viewed lại,
+    /// dwell sau bg không quy được về screen nào.
+    internal static func forgetLastScreen() {
+        shared.lastScreenLock.lock()
+        defer { shared.lastScreenLock.unlock() }
+        shared.lastScreen   = nil
+        shared.lastScreenAt = nil
+    }
+
     // Cached user_id từ identify() — customTrack(includeUser:true) đọc lại
     // stamp vào payload. SDK chỉ store value app đưa (app đã hash PII rồi).
     private let identityLock = NSLock()
