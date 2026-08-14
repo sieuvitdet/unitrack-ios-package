@@ -358,7 +358,11 @@ public final class SnowplowProvider: AnalyticsProvider {
         }
     }
 
-    public func setScreen(_ name: String) {
+    public func setScreen(_ name: String) { setScreen(name, previous: nil) }
+
+    /// `previous` do UniTrack stamp (single source of truth). Khi nil thì để
+    /// Snowplow tự suy như cũ — chỉ xảy ra nếu có caller gọi overload cũ.
+    public func setScreen(_ name: String, previous: String?) {
         // Hybrid mode: fire Snowplow builtin ScreenView →
         //   iglu:com.snowplowanalytics.mobile/screen_view/1-0-0
         // Snowplow SDK tự attach entity `screen` (id, name, previousName, …)
@@ -370,6 +374,14 @@ public final class SnowplowProvider: AnalyticsProvider {
         // vẫn attach — data team pivot theo action_name / user_id như cũ.
         if hybridScreenView, let tracker = tracker {
             let sv = ScreenView(name: name)
+            // Stamp previousName từ UniTrack thay vì để Snowplow tự suy.
+            // Snowplow giữ state screen riêng, không thấy screen_exited mà
+            // UniTrack fire lúc app vào background → ở resume nó sẽ ghi
+            // previousName = màn đứng trước lúc background, trong khi UniTrack
+            // biết screen vào lại từ chính nó. Hai nguồn sự thật, một sai.
+            if let previous = previous, !previous.isEmpty {
+                _ = sv.previousName(previous)
+            }
             let rawScreenName = resolveEventName(kind: "screen_view", defaultName: "screen_viewed")
             _ = sv.entities(buildEntities(forEventName: "screen_view",
                                           screen: name, elementKey: nil,

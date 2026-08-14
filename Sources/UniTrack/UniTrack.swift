@@ -113,17 +113,19 @@ public final class UniTrack {
         return shared.lastScreen
     }
 
-    /// Quên screen hiện tại để lần setScreen() kế tiếp được coi là boundary
-    /// thật. Gọi từ AppLifecycleObserver lúc resume: didEnterBackground đã
-    /// fire screen_exited cho top VC, nhưng lastScreen vẫn giữ tên đó, nên
-    /// setScreen() khi quay lại foreground sẽ bị dup guard (isSameScreen)
-    /// nuốt mất screen_viewed — screen đã exited mà không bao giờ viewed lại,
-    /// dwell sau bg không quy được về screen nào.
-    internal static func forgetLastScreen() {
-        shared.lastScreenLock.lock()
-        defer { shared.lastScreenLock.unlock() }
-        shared.lastScreen   = nil
-        shared.lastScreenAt = nil
+    /// Vào lại đúng screen vừa rời — dùng cho resume sau background.
+    ///
+    /// didEnterBackground đã fire screen_exited cho screen này, nên khi app
+    /// trở lại foreground đây là một boundary thật và phải fan-out
+    /// screen_viewed. Nhưng lastScreen vẫn đang giữ chính tên đó, nên
+    /// setScreen() thường sẽ bị dup guard (isSameScreen) nuốt mất.
+    ///
+    /// Hàm này bypass guard đúng một lần và stamp `previous = name`: screen
+    /// vào lại từ chính nó. Provider nhận giá trị này thay vì tự suy — nếu
+    /// để Snowplow tự suy, previousName sẽ là màn đứng trước lúc background
+    /// (state nội bộ của nó không thấy exit), lệch với UniTrack.
+    internal static func reenterScreen(_ name: String) {
+        setScreen(name, layer: nil, reentry: true)
     }
 
     // Cached user_id từ identify() — customTrack(includeUser:true) đọc lại
@@ -728,7 +730,7 @@ public final class UniTrack {
     /// same screen name within the dedup window. Public API stays the
     /// untagged overload above — apps that call `setScreen("Home")`
     /// directly behave exactly as before.
-    static func setScreen(_ name: String, layer: UniTrackLayer?) {
+    static func setScreen(_ name: String, layer: UniTrackLayer?, reentry: Bool = false) {
         // Trace so a "screen_viewed/screen_exited not firing" bug is one log
         // line away from a diagnosis. The core dedupes by screen-name equality
         // (same name twice in a row = no boundary events), so the next line
@@ -751,7 +753,13 @@ public final class UniTrack {
         // screen boundary thật → skip toàn bộ fan-out: provider setScreen (builtin
         // ScreenView ở hybrid), screen_exited, và screen_viewed. Trước đây chỉ
         // reset `previous = nil` để bỏ screen_exited, nhưng screen_viewed vẫn dup.
-        let isSameScreen = (previous == name)
+        // reentry (resume sau background): screen_exited đã fire lúc vào bg
+        // nên đây là boundary thật dù tên trùng — bypass guard.
+        let isSameScreen = (previous == name) && !reentry
+        // Tên screen thật sự vừa rời, lấy TRƯỚC khi guard reset previous về
+        // nil, để stamp xuống provider. Ở reentry nó chính là `name` — provider
+        // cần biết điều đó thay vì tự suy ra màn đứng trước lúc background.
+        let cameFrom = previous
         if isSameScreen { previous = nil }
         if let prev = previous, !prev.isEmpty,
            let lastAt = shared.lastScreenAt {
@@ -768,7 +776,10 @@ public final class UniTrack {
         // đã chặn cho custom vendor. Provider setScreen khác đều no-op nên
         // gate ở đây không đổi hành vi path non-hybrid.
         if !isSameScreen {
-            forEachProvider { $0.setScreen(name) }
+            // Stamp previous từ state của UniTrack — provider KHÔNG tự suy,
+            // nếu không hai nguồn sự thật sẽ lệch (vd Snowplow builtin
+            // ScreenView ở resume ra previousName = màn trước background).
+            forEachProvider { $0.setScreen(name, previous: cameFrom) }
         }
 
         guard let ctx = shared.context else { return }
@@ -788,7 +799,9 @@ public final class UniTrack {
         // from / from_screen / previous_screen_name / is_exit_screen) so
         // Snowplow's schema-aligned consumers see one canonical payload
         // regardless of which path delivered the event.
-        if shared.screenLifecycleEnabled, let prev = previous, !prev.isEmpty {
+        // !reentry: didEnterBackground đã fire screen_exited cho screen này
+        // rồi, fire lại ở đây là dup.
+        if shared.screenLifecycleEnabled, !reentry, let prev = previous, !prev.isEmpty {
             // Per-screen counters — Snowplow builtin screen_summary/1-0-0
             // semantic. foreground_sec = tổng giây user active trên screen
             // vừa close (dwell trừ đi các window bg giữa chừng).
