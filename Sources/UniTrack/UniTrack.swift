@@ -722,7 +722,6 @@ public final class UniTrack {
         // confirms the boundary path was even reached on the C++ side.
         UniTrack.log("[UniTrack] setScreen → name=%@ layer=%@ (calls core ut_set_screen_for_layer which fires screen_start/screen_view/screen_end)",
                      name, layer.map { String(describing: $0) } ?? "none")
-        forEachProvider { $0.setScreen(name) }
         // Snapshot previous screen + transition timestamp on the binding side
         // so the boundary fan-out below can build matching screen_exited /
         // screen_viewed payloads for providers. The C++ core does its own
@@ -736,9 +735,9 @@ public final class UniTrack {
         previous = shared.lastScreen
         // ponytail: 1-line dup guard. Cùng screen 2 lần liên tiếp (vd viewDidAppear
         // fire lại sau khi pop popup, hoặc AppLifecycle bg→fg re-fire) → không có
-        // screen boundary thật → skip cả exit lẫn entry fan-out. Trước đây chỉ
-        // reset `previous = nil` để bỏ screen_exited, nhưng screen_viewed vẫn
-        // fire dup ở line 799. Giờ 1 flag, gate cả 2.
+        // screen boundary thật → skip toàn bộ fan-out: provider setScreen (builtin
+        // ScreenView ở hybrid), screen_exited, và screen_viewed. Trước đây chỉ
+        // reset `previous = nil` để bỏ screen_exited, nhưng screen_viewed vẫn dup.
         let isSameScreen = (previous == name)
         if isSameScreen { previous = nil }
         if let prev = previous, !prev.isEmpty,
@@ -748,6 +747,16 @@ public final class UniTrack {
         shared.lastScreen   = name
         shared.lastScreenAt = now
         shared.lastScreenLock.unlock()
+
+        // ponytail: gate provider setScreen bằng CHÍNH isSameScreen ở trên.
+        // Trước đây call này chạy trước khi guard được tính → dưới hybrid
+        // (SnowplowProvider.setScreen fire builtin ScreenView) cùng screen 2
+        // lần liên tiếp vẫn bắn dup, đúng cái mà guard entry fan-out bên dưới
+        // đã chặn cho custom vendor. Provider setScreen khác đều no-op nên
+        // gate ở đây không đổi hành vi path non-hybrid.
+        if !isSameScreen {
+            forEachProvider { $0.setScreen(name) }
+        }
 
         guard let ctx = shared.context else { return }
         if let layer = layer {
