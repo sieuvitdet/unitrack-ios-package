@@ -294,12 +294,14 @@ public final class SnowplowProvider: AnalyticsProvider {
                 let sid = UniTrack.currentSessionId()
                 if !sid.isEmpty { data["session_id"] = sid }
 
-                // ScreenEnd carries no payload; the screen name lives in the
-                // `screen` entity that Snowplow attaches alongside it.
-                if let screenEntity = event.entities.first(where: {
-                    $0.schema.contains("/screen/jsonschema/")
-                }), let name = (screenEntity.data as? [String: Any])?["name"] as? String,
-                   !name.isEmpty {
+                // ScreenEnd carries no payload of its own. Snowplow DOES attach
+                // a `screen` entity, but not until after global-context
+                // generators have run — reading event.entities here comes back
+                // empty (verified on session 7785b4db: core_action.screen was
+                // missing on all 76 builtin screen_end rows). Ask UniTrack
+                // instead: screen_end fires for the screen being left, which is
+                // exactly the last setScreen() UniTrack recorded.
+                if let name = UniTrack.previousScreenName(), !name.isEmpty {
                     data["screen"] = name
                 }
 
@@ -385,7 +387,19 @@ public final class SnowplowProvider: AnalyticsProvider {
         // dưới đây → dup (1 builtin + 1 custom). Skip.
         // screen_exited + screen_load_completed vẫn đi qua path này (giữ custom
         // vendor với event_action + reason + foreground_sec fields).
-        if hybridScreenView, name == "screen_viewed" || name == "screen_view" {
+        // In hybrid mode the builtin Snowplow events are the contract:
+        //   screen_viewed → com.snowplowanalytics.mobile/screen_view
+        //   screen_exited → com.snowplowanalytics.mobile/screen_end
+        // Both already carry core_action (session_id + the business
+        // action_name), and screen_end additionally carries screen_summary
+        // with foreground_sec/background_sec. Letting the custom-vendor copy
+        // through as well double-counts every screen visit — measured 1:1 on
+        // session 7785b4db (77 builtin screen_view vs 76 custom screen_end).
+        //
+        // screen_load_completed stays on the custom path on purpose: Snowplow
+        // has no builtin equivalent and load_time_ms only UniTrack can measure.
+        if hybridScreenView,
+           name == "screen_viewed" || name == "screen_view" || name == "screen_exited" {
             return
         }
         // Auto-capture / screen-lifecycle events get routed to the right kind
