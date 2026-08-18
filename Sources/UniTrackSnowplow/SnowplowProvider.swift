@@ -472,7 +472,8 @@ public final class SnowplowProvider: AnalyticsProvider {
                                elementKey: String?,
                                extra: [SelfDescribingJson]?,
                                skipGlobalContexts: Bool,
-                               actionName: String? = nil) -> [SelfDescribingJson] {
+                               actionName: String? = nil,
+                               sessionId: String? = nil) -> [SelfDescribingJson] {
         var out: [SelfDescribingJson] = []
         if !skipGlobalContexts {
             if let userRaw = entities["user_context"],
@@ -502,7 +503,12 @@ public final class SnowplowProvider: AnalyticsProvider {
                 if let key    = elementKey, !key.isEmpty      { data["element_key"] = key }
                 // Stamp session_id onto every event — the single join key
                 // shared with Portal + custom HTTP providers.
-                let sid = UniTrack.currentSessionId()
+                // ponytail: prefer the id the CALLER already captured when
+                // the event was created. UniTrack.currentSessionId() lazily
+                // rotates (past the 30' idle window it mints a fresh UUID as a
+                // side effect), so reading it again here could stamp a
+                // DIFFERENT session than the event payload carries.
+                let sid = sessionId ?? UniTrack.currentSessionId()
                 if !sid.isEmpty { data["session_id"] = sid }
                 out.append(SelfDescribingJson(schema: coreSchema,
                                               andData: Self.stringifyAll(data)))
@@ -597,7 +603,8 @@ public final class SnowplowProvider: AnalyticsProvider {
                                  screen: screen, elementKey: elementKey,
                                  extra: extraContexts,
                                  skipGlobalContexts: skipGlobalContexts,
-                                 actionName: rawActionName)
+                                 actionName: rawActionName,
+                                 sessionId: filtered["session_id"] as? String)
         // Stringify at the boundary so ALL Iglu schemas that declare fields
         // as string stop rejecting events into bad-events, no matter what
         // type upstream (swizzlers, auto-capture, host helpers) passed in.

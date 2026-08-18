@@ -47,6 +47,16 @@ static int64_t read_int_field(const std::string& blob, const std::string& key) {
     return sign * out;
 }
 
+void SessionManager::set_salt(const std::string& salt) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (salt == salt_) return;
+    salt_ = salt;
+    // The ctor already minted an untagged id before config was available.
+    // Re-mint under the new namespace — safe because load_from() has not run
+    // yet, so nothing has been persisted or stamped onto an event.
+    session_id_ = generate_session_id(salt_);
+}
+
 void SessionManager::load_from(const std::string& path) {
     std::lock_guard<std::mutex> lock(mu_);
     persist_path_ = path;
@@ -154,7 +164,7 @@ void SessionManager::rotate_locked(SessionEndReason reason) {
     prev_reason_      = reason;
     pending_boundary_ = true;
 
-    session_id_       = generate_uuid();
+    session_id_       = generate_session_id(salt_);
     started_at_ms_    = now;
     last_activity_ms_ = now;
     session_index_   += 1;

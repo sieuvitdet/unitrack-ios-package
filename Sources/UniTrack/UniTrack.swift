@@ -32,6 +32,15 @@ public final class UniTrack {
         /// inactivity/background window after which a session is closed.
         public var journeyCapture: Bool         = true
         public var sessionTimeoutMs: Int        = 1_800_000  // 30 min
+
+        /// Namespace salt for session ids (portal `sdk_config.session_id_salt`).
+        /// When set, every session id this install mints is prefixed with an
+        /// 8-hex tag derived from the salt, so two projects sharing one
+        /// warehouse table can never collide. The UUID keeps all 122 random
+        /// bits — the tag is a prefix, not mixed into the entropy.
+        /// Empty (default) = bare UUIDv4, unchanged from before.
+        /// Use a per-project constant; never derive it from device identity.
+        public var sessionIdSalt: String        = ""
         /// Process khởi động KHÔNG do user mở app. Session là "phiên sử dụng
         /// của user" nên một process không UI không được tạo session mới.
         ///
@@ -1231,6 +1240,9 @@ public final class UniTrack {
         }
         if let s = c.screenEndEvent, !s.isEmpty {
             parts.append("\"screen_end_event\":\"\(s)\"")
+        }
+        if !c.sessionIdSalt.isEmpty {
+            parts.append("\"session_id_salt\":\"\(c.sessionIdSalt)\"")
         }
         if let docs = FileManager.default.urls(
                 for: .documentDirectory, in: .userDomainMask).first {

@@ -50,6 +50,12 @@ Tracker::Tracker(Config cfg, ut_platform platform)
     // Restore session state from disk so session_id + session_index survive
     // across launches (Snowplow client_session parity). Must come AFTER the
     // session timeout is set above and BEFORE the first build_event call.
+    // Namespace salt must be applied BEFORE load_from: the ctor already minted
+    // an untagged id, and load_from() either persists it or replays a stored
+    // one. A persisted id is replayed byte-for-byte, so changing the salt never
+    // rewrites an in-flight session — only newly minted ids pick up the tag.
+    session_.set_salt(config_.session_id_salt);
+
     session_.load_from(dir + "/session.json");
 
     // Pick up any crash captured on the previous launch. A crash recovered at

@@ -24,6 +24,17 @@ struct Config {
     bool        journey_capture   = true;
     int         session_timeout_ms = 30 * 60 * 1000;  // 30 min
 
+    // Optional namespace salt for session ids (config `session_id_salt`).
+    // When set, ids are emitted as "<8-hex tag>-<uuid>" where the tag derives
+    // from this salt — so two app flavours / tenants writing into one
+    // warehouse table can never collide. The UUID keeps all 122 random bits:
+    // the tag is a prefix, never mixed into the entropy.
+    //
+    // Empty (default) -> bare UUIDv4, byte-identical to the pre-salt format.
+    // Do NOT derive this from device identity — a device-derived salt makes
+    // ids deterministic per device, which is a collision AND a fingerprint.
+    std::string session_id_salt;
+
     // Screen lifecycle. When set_screen() switches screens, the Tracker emits a
     // screen_view (always, back-compat) plus — when screen_lifecycle is on — a
     // "screen_end" for the screen being left (carrying dwell_ms = time spent on
