@@ -51,7 +51,11 @@ public:
     // file exists and the last activity is within the timeout, the existing
     // session is resumed; otherwise a new one is opened and `index` increments.
     // Safe to call once at Tracker init — no-op for a never-launched app.
-    void load_from(const std::string& path);
+    // `headless` = process khởi động không do user mở app (FCM wake, job).
+    // Khi true, session đã persist được giữ nguyên và KHÔNG rotate, kể cả
+    // clean_shutdown=0 — vì "app chết mà không qua background" là trạng thái
+    // bình thường của một process headless, không phải dấu hiệu bị kill.
+    void load_from(const std::string& path, bool headless = false);
 
     // Returns the current session id, starting a new one if the timeout
     // elapsed. Does NOT report rotation — use resolve() when you need to emit
@@ -93,9 +97,18 @@ public:
     // Namespace salt for generated session ids (config `session_id_salt`).
     // Must be called BEFORE load_from() — the ctor has already minted an id by
     // then, so this re-tags it in place. Empty salt = untagged ids (default,
-    // byte-identical to the pre-salt format). A persisted id is replayed
-    // exactly as stored, so ids stay stable across a config change mid-session.
+    // byte-identical to the pre-salt format). Changing the salt does NOT
+    // invalidate a resumed session: a persisted id is replayed exactly as
+    // stored, so ids stay stable across a config change mid-session.
     void set_salt(const std::string& salt);
+
+    // Grace window for an unclean relaunch. Below this, a launch with
+    // clean_shutdown=0 RESUMES the stored session instead of reporting a kill:
+    // force-quit-then-reopen inside a few seconds is one period of use, and
+    // iOS may also kill a suspended app before the state write lands, so a
+    // missing flag alone is not proof of a kill. Deliberately small — a
+    // genuine kill the user returns from later still rotates.
+    static constexpr int64_t KILL_GRACE_MS = 10 * 1000;  // 10s
 
 private:
     std::mutex     mu_;

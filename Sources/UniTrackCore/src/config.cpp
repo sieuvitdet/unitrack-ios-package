@@ -109,6 +109,7 @@ Config Config::from_json(const std::string& api_key, const std::string& json) {
     if (find_bool(json, "enabled", b))         c.enabled         = b;
     if (find_bool(json, "auto_capture", b))    c.auto_capture    = b;
     if (find_bool(json, "journey_capture", b)) c.journey_capture = b;
+    if (find_bool(json, "headless_launch", b)) c.headless_launch = b;
     if (find_bool(json, "screen_lifecycle", b)) c.screen_lifecycle = b;
 
     // Optional custom names for the screen lifecycle events (renameable taxonomy).
@@ -117,7 +118,7 @@ Config Config::from_json(const std::string& api_key, const std::string& json) {
     s = find_string(json, "screen_end_event");
     if (!s.empty()) c.screen_end_event = s;
 
-    // Namespace salt for session ids. Absent/empty -> bare UUIDs (default).
+    // Namespace salt for session ids. Absent/empty → bare UUIDs (default).
     s = find_string(json, "session_id_salt");
     if (!s.empty()) c.session_id_salt = s;
 

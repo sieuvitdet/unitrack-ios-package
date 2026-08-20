@@ -47,16 +47,16 @@ Tracker::Tracker(Config cfg, ut_platform platform)
     dir = (slash == std::string::npos) ? "." : dir.substr(0, slash);
     CrashHandler::install(dir);
 
-    // Restore session state from disk so session_id + session_index survive
-    // across launches (Snowplow client_session parity). Must come AFTER the
-    // session timeout is set above and BEFORE the first build_event call.
     // Namespace salt must be applied BEFORE load_from: the ctor already minted
     // an untagged id, and load_from() either persists it or replays a stored
     // one. A persisted id is replayed byte-for-byte, so changing the salt never
     // rewrites an in-flight session — only newly minted ids pick up the tag.
     session_.set_salt(config_.session_id_salt);
 
-    session_.load_from(dir + "/session.json");
+    // Restore session state from disk so session_id + session_index survive
+    // across launches (Snowplow client_session parity). Must come AFTER the
+    // session timeout is set above and BEFORE the first build_event call.
+    session_.load_from(dir + "/session.json", config_.headless_launch);
 
     // Pick up any crash captured on the previous launch. A crash recovered at
     // startup is, by definition, the crash that ended the *previous* session —
@@ -216,9 +216,12 @@ void Tracker::set_screen(const std::string& screen_name) {
               ",\"dwell_ms\":" + std::to_string(dwell_ms) +
               ",\"is_exit_screen\":false}");
     }
-    // screen start — raw name from config so consumers pivoting on
-    // event_action / core_action.action_name see business name
-    // (screen_viewed) not schema kind (screen_view).
+    // screen start — the raw event name comes from config so consumers
+    // pivoting on core_action.action_name / event_action see the business
+    // name (screen_viewed) instead of the schema kind (screen_view). When
+    // screen_lifecycle is off we still fire ONE start so downstream never
+    // loses the entry event; the config default is "screen_view" for
+    // backward compat with apps that never overrode it.
     std::string start_payload = "{\"screen\":\"" + screen_name +
                                 "\",\"screen_name\":\"" + screen_name + "\"";
     if (config_.screen_lifecycle && !previous.empty()) {
@@ -391,6 +394,11 @@ void Tracker::log_background() {
     session_.mark_clean_shutdown();
 }
 void Tracker::log_app_start(long cold_start_ms) {
+    // Headless launch (FCM wake, background job): không có user mở app nên
+    // không có "app start" để báo, và mở session boundary ở đây sẽ đẻ ra
+    // session rác đúng như load_from() vừa tránh. Bỏ qua hoàn toàn — event
+    // do process headless bắn vẫn stamp session_id đang persist.
+    if (config_.headless_launch) return;
     // Open the process's first session boundary (session_start) on launch.
     emit_session_boundary(SessionEndReason::timeout);
     std::ostringstream o;

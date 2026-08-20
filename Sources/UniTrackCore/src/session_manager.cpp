@@ -52,12 +52,13 @@ void SessionManager::set_salt(const std::string& salt) {
     if (salt == salt_) return;
     salt_ = salt;
     // The ctor already minted an untagged id before config was available.
-    // Re-mint under the new namespace — safe because load_from() has not run
-    // yet, so nothing has been persisted or stamped onto an event.
+    // Re-mint it under the new namespace so the very first session of a cold
+    // start is tagged too — safe because load_from() has not run yet, so
+    // nothing has been persisted or stamped onto an event.
     session_id_ = generate_session_id(salt_);
 }
 
-void SessionManager::load_from(const std::string& path) {
+void SessionManager::load_from(const std::string& path, bool headless) {
     std::lock_guard<std::mutex> lock(mu_);
     persist_path_ = path;
     std::ifstream f(path);
@@ -94,7 +95,7 @@ void SessionManager::load_from(const std::string& path) {
     // Resume the persisted session iff it was active within the timeout
     // window. Otherwise treat the gap as a fresh launch and bump the index.
     if (now - saved_last_act <= timeout_ms_) {
-        if (was_clean) {
+        if (was_clean || headless) {
             // Normal resume: process kết thúc bình thường (background) trong
             // timeout window. Tiếp tục session cũ, không rotate.
             session_id_       = saved_id;
@@ -102,10 +103,34 @@ void SessionManager::load_from(const std::string& path) {
             last_activity_ms_ = saved_last_act;
             session_index_    = saved_idx;
             prev_id_.clear();
+        } else if (now - saved_last_act <= KILL_GRACE_MS) {
+            // Killed, but the user came straight back (≤ KILL_GRACE_MS).
+            //
+            // A session is "a user's period of use". Force-quitting from the
+            // switcher and reopening a second later does not end that period —
+            // it is the same sitting. The old code ignored the gap entirely and
+            // rotated on ANY unclean launch, so a device measured on 2026-08-20
+            // produced three sessions in four seconds (gaps 2250/843/1286 ms,
+            // session_index 11→12→13) purely from repeated force-quits.
+            //
+            // Treating that as a kill is also unfalsifiable in the other
+            // direction: iOS can suspend and kill a backgrounded app before the
+            // state write lands (the SDK holds no UIApplication background task
+            // assertion), so clean_shutdown=0 does not reliably mean "killed".
+            // A short gap is the honest signal that the user never left.
+            //
+            // Beyond the grace window, an unclean launch still rotates —
+            // that case is a genuine kill worth reporting.
+            session_id_       = saved_id;
+            started_at_ms_    = saved_started ? saved_started : now;
+            last_activity_ms_ = saved_last_act;
+            session_index_    = saved_idx;
+            prev_id_.clear();
         } else {
-            // Killed: clean_shutdown=false + gap dưới timeout = app bị kill
-            // (swipe khỏi switcher / Force Stop / OS reclaim). Rotate ngay
-            // + surface boundary để Tracker fire session_ended kèm reason
+            // Killed: clean_shutdown=false + gap trên KILL_GRACE_MS nhưng dưới
+            // timeout = app bị kill (swipe khỏi switcher / Force Stop / OS
+            // reclaim) và user quay lại sau một lúc. Rotate ngay + surface
+            // boundary để Tracker fire session_ended kèm reason
             // killed_recovered. Không đợi 30 phút timeout.
             prev_id_         = saved_id;
             prev_started_ms_ = saved_started;
@@ -115,6 +140,26 @@ void SessionManager::load_from(const std::string& path) {
             session_index_   = saved_idx + 1;
             // session_id_ giữ UUID mới từ ctor.
         }
+    } else if (headless) {
+        // Gap exceeded the timeout, but this process was NOT started by the
+        // user (FCM push wake, WorkManager job, boot receiver). A session is a
+        // user's period of use, so a UI-less process must not open one — and
+        // must not close the persisted one either. Replay the stored session
+        // untouched and let the next real launch decide the boundary.
+        //
+        // Without this, every push rotated: one prod device reached
+        // session_index 1917, each phantom session holding ~3 events and no
+        // screens. The guard below in the <=timeout branch already covered
+        // short gaps; pushes normally arrive hours apart and so landed here.
+        session_id_       = saved_id;
+        started_at_ms_    = saved_started ? saved_started : now;
+        // Treat this wake as activity. Restoring the STALE last_activity here
+        // would leave the very next current_session_id() past the timeout, and
+        // that accessor lazily rotates — undoing this branch and re-creating
+        // the phantom session we just avoided.
+        last_activity_ms_ = now;
+        session_index_    = saved_idx;
+        prev_id_.clear();
     } else {
         // Gap exceeded timeout → roll forward. The newly generated session_id_
         // in the ctor stays; record the prior as previous + bump index.
@@ -127,7 +172,14 @@ void SessionManager::load_from(const std::string& path) {
     }
     // Reset clean_shutdown=false ngay khi mở app: nếu lần này app bị kill
     // trước khi đến didEnterBackground, lần cold start kế tiếp sẽ detect.
-    clean_shutdown_ = false;
+    //
+    // KHÔNG reset ở headless launch: process này không có UI nên sẽ không bao
+    // giờ chạy qua onActivityStopped để set lại =1. Ghi đè cờ ở đây sẽ làm
+    // lần user mở app thật sau đó bị chẩn đoán nhầm là killed_recovered, và
+    // rotate ra session rác. Khôi phục đúng giá trị đã persist — ctor khởi
+    // tạo clean_shutdown_=false nên phải gán lại tường minh, save_locked()
+    // bên dưới ghi thẳng field này xuống file.
+    clean_shutdown_ = headless ? was_clean : false;
     save_locked();
 }
 
