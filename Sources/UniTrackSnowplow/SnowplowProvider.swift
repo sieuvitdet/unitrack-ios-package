@@ -85,9 +85,9 @@ public final class SnowplowProvider: AnalyticsProvider {
     static let maxEventStoreAge: TimeInterval = 72 * 60 * 60   // 72h
 
     // Business action names the data team pivots on, per their event spec.
-    // Deliberately constants, not portal-configurable: these name the USER
-    // ACTION, while portal event_names[kind] names the SCHEMA. Conflating the
-    // two is what shipped action_name="screen_view" to production.
+    // These are deliberately constants, not portal-configurable: they name the
+    // USER ACTION, while portal event_names[kind] names the SCHEMA. Conflating
+    // the two is what shipped action_name="screen_view" to production.
     static let actionScreenViewed = "screen_viewed"   // screen appeared / came to foreground
     static let actionScreenExited = "screen_exited"   // user left the screen
 
@@ -253,7 +253,8 @@ public final class SnowplowProvider: AnalyticsProvider {
         // session_id and no action_name, and the data team cannot join it.
         //
         // Only registered in hybrid mode: with hybrid off the builtin screen
-        // events are not part of the contract.
+        // events are not part of the contract and stamping them would add
+        // entities to events nobody consumes.
         var configurations: [ConfigurationProtocol] = [trackerConfig, emitterConfig, plugin]
         if hybridScreenView {
             // Resolve core_action's URI once, here, where the portal entities
@@ -316,6 +317,8 @@ public final class SnowplowProvider: AnalyticsProvider {
                 data["timestamp"]  = now
                 data["start_time"] = now
 
+                // Schema URI comes from the same portal entities map the
+                // non-builtin path uses, so operators configure it in one place.
                 guard let schema = Self.sharedCoreActionSchema else { return [] }
                 return [SelfDescribingJson(schema: schema,
                                            andData: Self.stringifyAll(data))]
@@ -586,6 +589,9 @@ public final class SnowplowProvider: AnalyticsProvider {
     /// Any other name in `entities` is registered but data-less — pass it via
     /// extraContexts when calling the helper. `skipGlobalContexts: true` drops
     /// the three built-ins (useful when the caller is overriding).
+    /// - Parameter sessionId: the session id captured when the event was
+    ///   CREATED. Pass it whenever the caller already has one so core_action
+    ///   and the event payload cannot disagree; nil falls back to a live read.
     private func buildEntities(forEventName name: String,
                                screen: String?,
                                elementKey: String?,
@@ -620,13 +626,27 @@ public final class SnowplowProvider: AnalyticsProvider {
                 ]
                 if let screen = screen, !screen.isEmpty       { data["screen"]      = screen }
                 if let key    = elementKey, !key.isEmpty      { data["element_key"] = key }
+                // Đánh dấu event sinh ra bởi process KHÔNG có UI (VoIP push
+                // của cuộc gọi đến, background fetch): user không hề mở app.
+                // Những event này vẫn stamp session_id của phiên dùng thật gần
+                // nhất — không mở session mới, không kéo dài session cũ (core:
+                // headless_process_). Trộn chung khi thống kê thì session
+                // trông như kéo dài hàng giờ.
+                //
+                // Đội Data lọc is_headless=false để đếm phiên sử dụng thật.
+                // String để parity Iglu schema. Parity: Android
+                // SnowplowProvider.kt.
+                data["is_headless"] = UniTrack.isHeadlessLaunch() ? "true" : "false"
                 // Stamp session_id onto every event — the single join key
                 // shared with Portal + custom HTTP providers.
-                // ponytail: prefer the id the CALLER already captured when
-                // the event was created. UniTrack.currentSessionId() lazily
-                // rotates (past the 30' idle window it mints a fresh UUID as a
-                // side effect), so reading it again here could stamp a
-                // DIFFERENT session than the event payload carries.
+                //
+                // ponytail: prefer the id the CALLER already captured when the
+                // event was created. UniTrack.currentSessionId() lazily rotates
+                // (session_manager.cpp:176 — past the 30' idle window it mints a
+                // fresh UUID as a side effect), so calling it again down here
+                // could stamp a DIFFERENT session than the one on the event
+                // payload. Only fall back to a live read when the caller had
+                // nothing to give us.
                 let sid = sessionId ?? UniTrack.currentSessionId()
                 if !sid.isEmpty { data["session_id"] = sid }
                 out.append(SelfDescribingJson(schema: coreSchema,
@@ -718,12 +738,18 @@ public final class SnowplowProvider: AnalyticsProvider {
         // screen_exited, ...) — dùng nó cho core_action.action_name để phân
         // biệt được các lifecycle event share cùng schema.
         let rawActionName = filtered["event_action"] as? String
+        // Reuse the session id already stamped into the payload by track() so
+        // core_action.session_id and the event body can never disagree. Both
+        // used to call UniTrack.currentSessionId() independently, and that
+        // accessor rotates on a 30' idle gap — two reads straddling the
+        // boundary produced two different ids for one event.
+        let stampedSessionId = filtered["session_id"] as? String
         let ctxs = buildEntities(forEventName: eventName,
                                  screen: screen, elementKey: elementKey,
                                  extra: extraContexts,
                                  skipGlobalContexts: skipGlobalContexts,
                                  actionName: rawActionName,
-                                 sessionId: filtered["session_id"] as? String)
+                                 sessionId: stampedSessionId)
         // Stringify at the boundary so ALL Iglu schemas that declare fields
         // as string stop rejecting events into bad-events, no matter what
         // type upstream (swizzlers, auto-capture, host helpers) passed in.
