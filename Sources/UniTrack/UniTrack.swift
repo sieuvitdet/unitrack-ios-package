@@ -368,9 +368,12 @@ public final class UniTrack {
     ///
     ///     if !UniTrack.isHeadlessLaunch() { FSDKTracking.sessionStarted() }
     ///
-    /// Trên iOS luôn false trừ khi host tự set `config.headlessLaunch` —
-    /// notification không đánh thức process nên không có launch nào là
-    /// headless. Giữ API để code tích hợp giống hệt Android.
+    /// Trên iOS SDK không tự suy ra được (khác Android có
+    /// detectHeadlessLaunch), host phải set `config.headlessLaunch` — thường
+    /// là `UIApplication.shared.applicationState == .background` lúc
+    /// initialize. Đừng cho rằng iOS không có headless launch: VoIP push
+    /// (PushKit, cuộc gọi đến) BẮT BUỘC đánh thức process kể cả khi app đã
+    /// tắt hẳn, và background fetch cũng vậy.
     public static func isHeadlessLaunch() -> Bool {
         shared.sessionStatLock.lock(); defer { shared.sessionStatLock.unlock() }
         return shared.headlessLaunchValue
