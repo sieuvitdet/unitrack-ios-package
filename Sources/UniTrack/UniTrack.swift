@@ -32,14 +32,18 @@ public final class UniTrack {
         /// inactivity/background window after which a session is closed.
         public var journeyCapture: Bool         = true
         public var sessionTimeoutMs: Int        = 1_800_000  // 30 min
-
         /// Namespace salt for session ids (portal `sdk_config.session_id_salt`).
-        /// When set, every session id this install mints is prefixed with an
-        /// 8-hex tag derived from the salt, so two projects sharing one
-        /// warehouse table can never collide. The UUID keeps all 122 random
-        /// bits — the tag is a prefix, not mixed into the entropy.
-        /// Empty (default) = bare UUIDv4, unchanged from before.
-        /// Use a per-project constant; never derive it from device identity.
+        /// With a salt, ids are `"<8-hex tag>-<uuid>"`; the tag derives from the
+        /// salt, so two projects writing into one warehouse table can never
+        /// collide and an id is traceable to the config that minted it.
+        ///
+        /// The UUID keeps all 122 bits of entropy — the tag is a PREFIX, never
+        /// mixed into the random state. Empty (default) → bare UUID, identical
+        /// to the previous format.
+        ///
+        /// Use a PER-PROJECT CONSTANT. Never derive it from device identity
+        /// (device_id/IDFV): a device-derived salt makes ids repeat on the same
+        /// device — both a collision and a reversible fingerprint.
         public var sessionIdSalt: String        = ""
         /// Process khởi động KHÔNG do user mở app. Session là "phiên sử dụng
         /// của user" nên một process không UI không được tạo session mới.
@@ -154,10 +158,16 @@ public final class UniTrack {
 
     // Wire-event names for the screen boundary pair, sourced from
     // Config.screenStartEvent / screenEndEvent (typically set from portal
-    // sdk_config.screen_start_event / screen_end_event). Default to the
-    // business name, never the schema kind "screen_view" — that is the iglu
-    // parent shared by screen_viewed/screen_exited/screen_load_completed and
-    // must never ship as an event_action. Updated inside initialize().
+    // sdk_config.screen_start_event / screen_end_event). Updated inside
+    // initialize().
+    //
+    // ponytail: default is the BUSINESS name, never the schema kind.
+    // "screen_view" is the Snowplow convention kind (the iglu schema parent
+    // that screen_viewed + screen_exited + screen_load_completed all share) —
+    // it must never reach the wire as an event_action value. Config load is
+    // async in most hosts, so any screen that fires before initialize()
+    // completes ships whatever is here; a kind-shaped default turned that
+    // race into bad rows the data team could not pivot on.
     private var screenStartEventName: String = "screen_viewed"
     private var screenEndEventName:   String = "screen_exited"
     private var screenLifecycleEnabled: Bool = true
@@ -206,6 +216,8 @@ public final class UniTrack {
     public static func onSessionRotate(_ handler: @escaping (String) -> Void) {
         shared.sessionRotateLock.lock()
         shared.sessionRotateHandler = handler
+        // Seed the baseline so registering does not fire for the session that
+        // is already open — only genuine rotations after this point count.
         if shared.lastObservedSessionId == nil, let ctx = shared.context,
            let cstr = ut_current_session_id(ctx) {
             shared.lastObservedSessionId = String(cString: cstr)
@@ -379,6 +391,25 @@ public final class UniTrack {
         return shared.headlessLaunchValue
     }
 
+    /// Đánh dấu mọi event từ giờ KHÔNG phải user hoạt động, cho tới khi gọi
+    /// lại với `false`. Event vẫn stamp session đang chạy như thường; chỉ
+    /// đồng hồ timeout không được gia hạn, nên khoảng nghỉ vẫn tính từ lần
+    /// tương tác thật cuối cùng.
+    ///
+    /// Dùng trong push handler khi app đang background: process VẪN SỐNG nên
+    /// `isHeadlessLaunch()` trả false (nó chỉ đúng cho process khởi động
+    /// headless) và SDK không tự phân biệt được — host phải nói.
+    ///
+    /// Không chặn rotate: noti tới sau khi đã quá timeout vẫn mở session mới.
+    ///
+    /// Đo 2026-08-21 trên Xiaomi: app background từ 14:30, noti cách nhau
+    /// 8-33s, mỗi cái reset đồng hồ 30', nên mở app lúc 15:10 (sau 40') vẫn
+    /// không rotate. Parity: Android UniTrack.setBackgroundActivity.
+    public static func setBackgroundActivity(_ on: Bool) {
+        guard let ctx = shared.context else { return }
+        ut_set_background_activity(ctx, on ? 1 : 0)
+    }
+
     /// Lightweight per-session counters the app can opt into so session_ended
     /// carries useful business data. Apps call incrementScreenCount() when a
     /// new screen mounts, markError()/markCrash() at the appropriate spots.
@@ -518,7 +549,8 @@ public final class UniTrack {
     /// so post-refresh events land under the new names on the providers.
     ///
     /// Pass nil for any field to keep its current value. Empty string ""
-    /// resets to the default ("screen_viewed" / "screen_exited" / "screen_load_completed").
+    /// resets to the default ("screen_viewed" / "screen_exited" /
+    /// "screen_load_completed").
     public static func applyHotConfig(screenStartEvent: String? = nil,
                                       screenEndEvent:   String? = nil,
                                       screenLoadEvent:  String? = nil) {
@@ -1292,14 +1324,14 @@ public final class UniTrack {
         parts.append("\"journey_capture\":\(c.journeyCapture)")
         parts.append("\"headless_launch\":\(c.headlessLaunch)")
         parts.append("\"session_timeout_ms\":\(c.sessionTimeoutMs)")
+        if !c.sessionIdSalt.isEmpty {
+            parts.append("\"session_id_salt\":\"\(c.sessionIdSalt)\"")
+        }
         if let s = c.screenStartEvent, !s.isEmpty {
             parts.append("\"screen_start_event\":\"\(s)\"")
         }
         if let s = c.screenEndEvent, !s.isEmpty {
             parts.append("\"screen_end_event\":\"\(s)\"")
-        }
-        if !c.sessionIdSalt.isEmpty {
-            parts.append("\"session_id_salt\":\"\(c.sessionIdSalt)\"")
         }
         if let docs = FileManager.default.urls(
                 for: .documentDirectory, in: .userDomainMask).first {
